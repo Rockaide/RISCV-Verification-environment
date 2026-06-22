@@ -1,0 +1,32 @@
+## ----------------------------------------------------------------------------
+##Copyright 2023 CEA*
+##*Commissariat a l'Energie Atomique et aux Energies Alternatives (CEA)
+##
+##Licensed under the Apache License, Version 2.0 (the "License");
+##you may not use this file except in compliance with the License.
+##You may obtain a copy of the License at
+##
+##    http://www.apache.org/licenses/LICENSE-2.0
+##
+##Unless required by applicable law or agreed to in writing, software
+##distributed under the License is distributed on an "AS IS" BASIS,
+##WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+##See the License for the specific language governing permissions and
+##limitations under the License.
+##[END OF HEADER]
+## ----------------------------------------------------------------------------
+
+
+
+- tool: questa
+  compile:
+    work_lib    : "work_top"
+    svlog_option: "-64 	-L cv_uvm_dv_utils_lib -L tb_lib -L $QUESTA_HOME/uvm-1.2/ +incdir+$QUESTA_HOME/verilog_src/uvm-1.2/src" 
+    svlog_source: "$CORE_V_VERIF/lib/uvm_agents/uvma_axi5/example/sv/dut_env_pkg.sv 
+                   $CORE_V_VERIF/lib/uvm_agents/uvma_axi5/example/test/test_pkg.sv $CORE_V_VERIF/lib/uvm_agents/uvma_axi5/example/top/top.sv"
+    yaml_lists  :  "cv_dv_utils.yaml uvma_axi5.yaml"
+    vopt_option :  "-assertdebug -L cv_uvm_dv_utils_lib -L tb_lib +acc -note 12003 -suppress 2583 -note 13314"
+    top_entity  :  "top"
+  sim:
+    work_lib    : "work_top"
+    sim_option  : "opt -work work_top -L cv_uvm_dv_utils_lib -L tb_lib -note 8233 -note 12003 -c -classdebug -solvefailseverity=4 -solvefaildebug=2 -solvefailtestcase=constraint_failure.txt -l -assertdebug -msgmode both" 

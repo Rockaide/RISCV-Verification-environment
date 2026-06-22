@@ -1,0 +1,32 @@
+.bashrc
+corev-openhw-gcc-rocky8-20240530.tar.gz
+
+# Cadence Xcelium & Simulation Artifacts
+xrun_results/
+xcelium.d/
+INCA_libs/
+*.log
+*.err
+*.key
+*.history
+*.shm/
+*.trn
+*.dsn
+
+# GCC / Software Build Artifacts
+*.o
+*.elf
+*.hex
+*.itb
+*.nm
+*.a
+*.so
+
+# Python Environments
+dv-env/
+__pycache__/
+*.pyc
+
+# OS Generated Files
+.DS_Store
+tools/
