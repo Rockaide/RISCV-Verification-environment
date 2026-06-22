@@ -239,6 +239,7 @@ module uvmt_cv32e40p_tb;
   /**
    * ISS WRAPPER instance:
    */
+`ifdef ISS_IMPERAS
     uvmt_cv32e40p_iss_wrap  #(
                               .ID (0)
                               )
@@ -247,6 +248,7 @@ module uvmt_cv32e40p_tb;
                                         .step_compare_if(step_compare_if),
                                         .isa_covg_if(isa_covg_if)
                                 );
+`endif
 
     /**
     * Step-and-Compare logic 
@@ -260,7 +262,11 @@ module uvmt_cv32e40p_tb;
     assign clknrst_if_iss.reset_n = clknrst_if.reset_n;
 
     // Connect step-and-compare signals to interrupt_if for functional coverage of instructions and interrupts
+`ifdef ISS_IMPERAS
     assign interrupt_if.deferint = iss_wrap.io.deferint;
+`else
+    assign interrupt_if.deferint = 1'b0; // Default when ISS is Spike
+`endif
     assign interrupt_if.ovp_cpu_state_stepi = step_compare_if.ovp_cpu_state_stepi;
 
     // Interrupt modeling logic - used to time interrupt entry from RTL to the ISS    
@@ -313,11 +319,15 @@ module uvmt_cv32e40p_tb;
       */
     always @(posedge clknrst_if.clk or negedge clknrst_if.reset_n) begin
       if (!clknrst_if_iss.reset_n) begin
+`ifdef ISS_IMPERAS
         iss_wrap.io.deferint <= 1'b1;
+`endif
         deferint_ack <= 1'b1;
       end
       else if (id_start && !step_compare_if.deferint_prime) begin
+`ifdef ISS_IMPERAS
         iss_wrap.io.deferint <= 1'b0;
+`endif
         deferint_ack <= step_compare_if.deferint_prime_ack;
       end
     end
@@ -326,11 +336,17 @@ module uvmt_cv32e40p_tb;
       * deferint deassertion logic, on negedge of ovp_cpu_state_stepi from the ISS the deferint has been consumed 
       */
     always @(negedge step_compare_if.ovp_cpu_state_stepi) begin
+`ifdef ISS_IMPERAS
       if (iss_wrap.io.deferint == 0) begin
         iss_wrap.io.deferint <= 1'b1;
         deferint_ack <= 1'b1;
         irq_deferint_ack <= '0;
       end
+`else
+      // Dummy behavior to prevent hang if deferint logic runs
+      deferint_ack <= 1'b1;
+      irq_deferint_ack <= '0;
+`endif
       irq_deferint_sleep <= '0;
     end
 
@@ -352,10 +368,12 @@ module uvmt_cv32e40p_tb;
         irq_deferint_sleep <= irq_enabled;
     end
 
+`ifdef ISS_IMPERAS
     always @*
       iss_wrap.io.irq_i = iss_wrap.io.deferint ? dut_wrap.irq :
                           !deferint_ack ? irq_deferint_ack :
                           irq_deferint_sleep;
+`endif
 
     /**
       * Interrupt assertion to iss_wrap, note this runs on the ISS clock (skewed from core clock)
@@ -372,11 +390,16 @@ module uvmt_cv32e40p_tb;
             irq_mip[irq_idx] <= 1'b1;
           // If deferint is low and ovp_cpu_state_stepi is asserted, then interrupt was consumed by model
           // Clear it now to avoid mip miscompare
+`ifdef ISS_IMPERAS
           else if (step_compare_if.ovp_cpu_state_stepi && iss_wrap.io.deferint == 0)
             irq_mip[irq_idx] <= 1'b0;
           // If RTL interrupt deasserts, but the core has not taken the interrupt, then clear ISS irq
           else if (iss_wrap.io.deferint == 1)
             irq_mip[irq_idx] <= 1'b0;
+`else
+          else if (step_compare_if.ovp_cpu_state_stepi)
+            irq_mip[irq_idx] <= 1'b0;
+`endif
         end
       end
     end
@@ -414,12 +437,16 @@ module uvmt_cv32e40p_tb;
 
     always @(posedge clknrst_if_iss.clk or negedge clknrst_if_iss.reset_n) begin
       if (!clknrst_if_iss.reset_n) begin
+`ifdef ISS_IMPERAS
           iss_wrap.io.haltreq <= 1'b0;
+`endif
           debug_req_state <= INACTIVE;
       end else begin
           unique case(debug_req_state)
               INACTIVE: begin
+`ifdef ISS_IMPERAS
                   iss_wrap.io.haltreq <= 1'b0;
+`endif
 
                   // Only drive haltreq if we have an external request
                   if (dut_wrap.cv32e40p_wrapper_i.core_i.id_stage_i.controller_i.ctrl_fsm_cs inside {cv32e40p_pkg::DBG_TAKEN_ID, cv32e40p_pkg::DBG_TAKEN_IF} &&
@@ -428,22 +455,31 @@ module uvmt_cv32e40p_tb;
                       debug_req_state <= DBG_TAKEN;
                       // Already in sync, assert halreq right away
                       if (count_retire == count_issue) begin
+`ifdef ISS_IMPERAS
                           iss_wrap.io.haltreq <= 1'b1;
+`endif
                       end
                   end
               end
               DBG_TAKEN: begin
                   // Assert haltreq when we are in sync
                   if (count_retire == count_issue) begin
+`ifdef ISS_IMPERAS
                       iss_wrap.io.haltreq <= 1'b1;
+`endif
                       debug_req_state <= DRIVE_REQ;
                   end
               end
               DRIVE_REQ: begin
                   // Deassert haltreq when DM is observed
+`ifdef ISS_IMPERAS
                   if(iss_wrap.io.DM == 1'b1) begin
                       debug_req_state <= INACTIVE;
                   end
+`else
+                  // Just complete cycle if Spike is used
+                  debug_req_state <= INACTIVE;
+`endif
               end
               default: begin
                   debug_req_state <= INACTIVE;
@@ -482,7 +518,11 @@ module uvmt_cv32e40p_tb;
      uvm_config_db#(virtual uvmt_cv32e40p_isa_covg_if        )::set(.cntxt(null), .inst_name("*.env"),                        .field_name("isa_covg_vif"),     .value(isa_covg_if)                                );
      uvm_config_db#(virtual uvma_interrupt_if                )::set(.cntxt(null), .inst_name("*.env"),                        .field_name("intr_vif"),         .value(interrupt_if)                               );
      uvm_config_db#(virtual uvma_debug_if                    )::set(.cntxt(null), .inst_name("*.env"),                        .field_name("debug_vif"),        .value(debug_if)                                   );
+`ifdef ISS_IMPERAS
+`ifdef ISS_IMPERAS
      uvm_config_db#(virtual RVVI_memory                      )::set(.cntxt(null), .inst_name("*.env"),                        .field_name("rvvi_memory_vif"),  .value(iss_wrap.ram.memory)                        );
+`endif
+`endif
 
      // Make the DUT Wrapper Virtual Peripheral's status outputs available to the base_test
      uvm_config_db#(bit      )::set(.cntxt(null), .inst_name("*"), .field_name("tp"),     .value(1'b0)        );

@@ -12,6 +12,7 @@
 #include "riscv/processor.h"
 #include "riscv/mmu.h"
 #include "riscv/cfg.h"
+#include "riscv/Params.h"
 
 // Global pointers to hold the Spike simulation instance and configuration
 sim_t* spike_sim = nullptr;
@@ -29,10 +30,24 @@ extern "C" {
         // Target CV32E40P capabilities
         std::string target_isa = isa ? isa : "RV32IMFC";
         
-        // Configure Spike
-        spike_cfg = new cfg_t();
-        spike_cfg->isa = target_isa.c_str();
-        spike_cfg->priv = "M"; // Machine mode for bare-metal RISCV-DV tests
+        // Configure Spike memory: 512MB starting at 0x0
+        std::vector<mem_cfg_t> mem_layout;
+        mem_layout.push_back(mem_cfg_t(0x00000000, 0x20000000));
+        std::vector<size_t> hartids = {0}; // 1 hart with ID 0
+        spike_cfg = new cfg_t(
+            std::make_pair((reg_t)0, (reg_t)0), // default_initrd_bounds
+            nullptr,                            // default_bootargs
+            target_isa.c_str(),                 // default_isa
+            "M",                                // default_priv
+            "vlen:128,elen:64",                 // default_varch
+            false,                              // default_misaligned
+            endianness_little,                  // default_endianness
+            16,                                 // default_pmpregions
+            mem_layout,                         // default_mem_layout
+            hartids,                            // default_hartids
+            false,                              // default_real_time_clint
+            4                                   // default_trigger_count
+        );
         
         // Pass the compiled ELF file to Spike so it loads the identical memory image
         std::vector<std::string> args;
@@ -43,25 +58,26 @@ extern "C" {
         }
         
         // Setup modern Spike sim_t arguments
-        std::vector<std::pair<reg_t, abstract_mem_t*>> mems;
-        std::vector<std::pair<const device_factory_t*, std::vector<std::string>>> plugin_devices;
+        std::vector<std::pair<reg_t, mem_t*>> mems;
+        mems.push_back(std::make_pair(0x00000000, new mem_t(0x20000000)));
+        std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
         debug_module_config_t dmc; 
+        openhw::Params params;
         
-        // Instantiate the simulator with the 13-argument constructor
+        // Instantiate the simulator with the 12-argument constructor
         spike_sim = new sim_t(
             spike_cfg,            // cfg_t configuration
             false,                // halted on reset
             mems,                 // physical memory regions
             plugin_devices,       // plugin devices
-            false,                // dtb_enabled (typically false for bare-metal DV)
             args,                 // executable and arguments
             dmc,                  // debug module configuration
             nullptr,              // log path
-            false,                // require_authentication
+            false,                // dtb_enabled (typically false for bare-metal DV)
             nullptr,              // dtb_file
-            false,                // help
+            false,                // socket_enabled
             nullptr,              // cmd_file
-            0                     // socket_port
+            params                // openhw::Params
         );
                               
         // Extract hart 0 (the primary core)
@@ -69,6 +85,9 @@ extern "C" {
         
         // Reset the processor to ensure deterministic state at time 0
         spike_core->reset();
+        
+        // CV32E40P default boot_addr_i is 0x80
+        spike_core->get_state()->pc = 0x80;
         
         std::cout << "[DPI-C] Spike initialized successfully with ELF: " 
                   << (elf_file ? elf_file : "NONE") << std::endl;

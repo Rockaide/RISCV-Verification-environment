@@ -686,7 +686,8 @@ DPI_DASM_CXX    = g++
 
 dpi_dasm: $(DPI_DASM_SPIKE_PKG)
 	$(CLONE_DPI_DASM_SPIKE_CMD)
-	$(DPI_DASM_CXX) $(DPI_DASM_CFLAGS) $(DPI_DASM_INC) $(DPI_DASM_SRC) -o $(DPI_DASM_LIB)
+	echo "{ global: dasm_*; local: *; };" > $(DPI_DASM_PKG)/version.map
+	$(DPI_DASM_CXX) $(DPI_DASM_CFLAGS) $(DPI_DASM_INC) $(DPI_DASM_SRC) -o $(DPI_DASM_LIB) -Wl,--version-script=$(DPI_DASM_PKG)/version.map
 
 ###############################################################################
 # Build vendor/riscv-isa-sim into tools/
@@ -704,12 +705,17 @@ NUM_JOBS ?= 8
 
 $(SPIKE_FESVR_LIB).so $(SPIKE_RISCV_LIB).so:
 	mkdir -p $(SPIKE_PATH)/build;
-	[ ! -f $(SPIKE_PATH)/build/config.log ] && cd $(SPIKE_PATH)/build && ../configure --prefix=$(SPIKE_INSTALL_DIR) || true
+	[ ! -f $(SPIKE_PATH)/build/config.log ] && cd $(SPIKE_PATH)/build && ../configure --prefix=$(SPIKE_INSTALL_DIR) CXXFLAGS="-I$(DPI_INCLUDE)" || true
 	make -C $(SPIKE_PATH)/build/ -j $(NUM_JOBS) yaml-cpp-static;
 	make -C $(SPIKE_PATH)/build/ -j $(NUM_JOBS) yaml-cpp;
 	make -C $(SPIKE_PATH)/build/ -j $(NUM_JOBS) install;
 
-spike_lib: $(SPIKE_FESVR_LIB).so $(SPIKE_RISCV_LIB).so
+SPIKE_WRAPPER_LIB = $(CORE_V_VERIF)/lib/dpi/libspike_wrapper.so
+
+$(SPIKE_WRAPPER_LIB): $(SPIKE_RISCV_LIB).so
+	g++ -shared -fPIC -std=c++17 -I$(SPIKE_INSTALL_DIR)/include -I$(SPIKE_PATH) -I$(SPIKE_PATH)/riscv -I$(DPI_INCLUDE) $(CORE_V_VERIF)/lib/dpi/spike_wrapper.cpp -o $(SPIKE_WRAPPER_LIB) -L$(SPIKE_LIBS_DIR) -Wl,-rpath=$(SPIKE_LIBS_DIR) -lriscv -lfesvr -lyaml-cpp
+
+spike_lib: $(SPIKE_FESVR_LIB).so $(SPIKE_RISCV_LIB).so $(SPIKE_WRAPPER_LIB)
 
 ###############################################################################
 # Build SVLIB DPI

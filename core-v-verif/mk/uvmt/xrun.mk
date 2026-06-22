@@ -173,7 +173,27 @@ endif
 XRUN_UVM_MACROS_INC_FILE = $(DV_UVMT_PATH)/uvmt_$(CV_CORE_LC)_uvm_macros_inc.sv
 
 XRUN_FILE_LIST ?= -f $(DV_UVMT_PATH)/uvmt_$(CV_CORE_LC).flist
-XRUN_FILE_LIST += -f $(DV_UVMT_PATH)/imperas_iss.flist
+
+ifeq ($(call IS_YES,$(USE_ISS)),YES)
+    # The default ISS parameter check needs to handle case-insensitivity
+    ifeq ($(shell echo $(ISS) | tr A-Z a-z),imperas)
+        XRUN_FILE_LIST += -f $(DV_UVMT_PATH)/imperas_iss.flist
+        XRUN_RUN_BASE_FLAGS += -sv_lib $(OVP_MODEL_DPI)
+        XRUN_USER_COMPILE_ARGS += +define+ISS_IMPERAS
+    endif
+    ifeq ($(shell echo $(ISS) | tr A-Z a-z),spike)
+        XRUN_USER_COMPILE_ARGS += +define+ISS_SPIKE
+        XRUN_FILE_LIST += +incdir+$(DV_OVPM_DESIGN)
+        XRUN_FILE_LIST += $(DV_OVPM_DESIGN)/typedefs.sv
+        XRUN_FILE_LIST += $(DV_OVPM_DESIGN)/ram.sv
+        XRUN_FILE_LIST += $(DV_UVMT_PATH)/uvmt_cv32e40p_step_compare.sv
+        XRUN_RUN_BASE_FLAGS += -sv_lib $(SPIKE_WRAPPER_LIB)
+        XRUN_RUN_BASE_FLAGS += -sv_lib $(SPIKE_YAML_LIB)
+        XRUN_RUN_BASE_FLAGS += -sv_lib $(SPIKE_RISCV_LIB)
+        XRUN_RUN_BASE_FLAGS += -sv_lib $(SPIKE_DISASM_LIB)
+        LIBS = spike_lib
+    endif
+endif
 XRUN_USER_COMPILE_ARGS += +define+$(CV_CORE_UC)_TRACE_EXECUTION
 XRUN_USER_COMPILE_ARGS += +define+UVM
 ifeq ($(call IS_YES,$(USE_ISS)),YES)
@@ -294,7 +314,7 @@ XRUN_COMP = $(XRUN_COMP_FLAGS) \
 		$(XRUN_FILE_LIST) \
 		$(UVM_PLUSARGS)
 
-comp: mk_xrun_dir $(CV_CORE_PKG) $(SVLIB_PKG)
+comp: mk_xrun_dir $(CV_CORE_PKG) $(SVLIB_PKG) $(LIBS)
 	@echo "$(BANNER)"
 	@echo "* Compiling xrun in $(SIM_CFG_RESULTS)"
 	@echo "* Log: $(SIM_CFG_RESULTS)/xrun.log"

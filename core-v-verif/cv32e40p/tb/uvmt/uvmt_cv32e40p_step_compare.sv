@@ -57,9 +57,20 @@ import uvm_pkg::*;      // needed for the UVM messaging service (`uvm_info(), et
 `define CV32E40P_TRACER $root.uvmt_cv32e40p_tb.dut_wrap.cv32e40p_wrapper_i.tracer_i
 
 // TODO change names
+`ifdef ISS_IMPERAS
 `define CV32E40P_RM              $root.uvmt_cv32e40p_tb.iss_wrap.cpu
 `define CV32E40P_RM_RVVI_STATE   $root.uvmt_cv32e40p_tb.iss_wrap.cpu.state
 `define CV32E40P_RM_RVVI_CONTROL $root.uvmt_cv32e40p_tb.iss_wrap.cpu.control
+`endif
+
+`ifdef ISS_SPIKE
+import "DPI-C" context function void rvviRefInit(string isa, string elf_file);
+import "DPI-C" context function void rvviRefEventStep();
+import "DPI-C" context function int rvviRefPcCompare(input bit [31:0] rtl_pc);
+import "DPI-C" context function int rvviRefGprsCompare(input int reg_index, input bit [31:0] rtl_reg_val);
+import "DPI-C" context function int rvviRefCsrCompare(input int csr_address, input bit [31:0] rtl_csr_val);
+import "DPI-C" context function void rvviRefShutdown();
+`endif
 
 
 module uvmt_cv32e40p_step_compare
@@ -105,6 +116,24 @@ module uvmt_cv32e40p_step_compare
     end
   end
 
+`ifdef ISS_SPIKE
+  string elf_file;
+  initial begin
+    wait (clknrst_if.reset_n === 1'b0);
+    wait (clknrst_if.reset_n === 1'b1);
+    if ($value$plusargs("elf_file=%s", elf_file)) begin
+      `uvm_info("Step-and-Compare", $sformatf("Initializing Spike with ELF: %s", elf_file), UVM_NONE)
+      rvviRefInit("RV32IMC", elf_file);
+    end else begin
+      `uvm_fatal("Step-and-Compare", "No +elf_file specified for Spike ISS!")
+    end
+  end
+
+  final begin
+    rvviRefShutdown();
+  end
+`endif
+
   always begin
     wait (clknrst_if.reset_n === 1'b0);
     wait (clknrst_if.reset_n === 1'b1);
@@ -122,7 +151,11 @@ module uvmt_cv32e40p_step_compare
       end
       if (expected !== actual) begin
         miscompare = 1;
+`ifdef ISS_SPIKE
+        `uvm_error("Step-and-Compare", $sformatf("%s expected=0x%8h and actual=0x%8h PC=0x%8h", compared, expected, actual, step_compare_if.insn_pc))
+`else
         `uvm_error("Step-and-Compare", $sformatf("%s expected=0x%8h and actual=0x%8h PC=0x%8h", compared, expected, actual, step_compare_if.ovp_cpu_PCr))
+`endif
       end else begin
         `uvm_info("Step-and-Compare", $sformatf("%s expected=0x%8h==actual", compared, actual), UVM_DEBUG)
       end
@@ -139,8 +172,14 @@ module uvmt_cv32e40p_step_compare
       logic [31:0] csr_val;
 
       // Compare PC
-      //check_32bit(.compared("PC"), .expected(step_compare_if.ovp_cpu_PCr), .actual(step_compare_if.insn_pc));
+`ifdef ISS_SPIKE
+      if (rvviRefPcCompare(step_compare_if.insn_pc) != 0) begin
+         miscompare = 1;
+         `uvm_error("Step-and-Compare", $sformatf("PC Mismatch with Spike. RTL PC=0x%8h", step_compare_if.insn_pc))
+      end
+`else
       check_32bit(.compared("PC"), .expected(`CV32E40P_RM_RVVI_STATE.pc), .actual(step_compare_if.insn_pc));
+`endif
       step_compare_if.num_pc_checks++;
 
       // Compare GPR's
@@ -159,16 +198,42 @@ module uvmt_cv32e40p_step_compare
       // Ignore insn_regs_write_addr=0 just like in riscv_tracer.sv
       for (idx=0; idx<32; idx++) begin
          compared_str = $sformatf("GPR[%0d]", idx);
+`ifdef ISS_SPIKE
+         if ((idx == insn_regs_write_addr) && (idx != 0) && (insn_regs_write_size == 1)) begin
+            if (rvviRefGprsCompare(idx, insn_regs_write_value) != 0) begin
+               miscompare = 1;
+               `uvm_error("Step-and-Compare", $sformatf("GPR[%0d] Mismatch with Spike. RTL=0x%8h", idx, insn_regs_write_value))
+            end
+         end
+         else if (!is_stall_sim && !`CV32E40P_TRACER.insn_wb_bypass) begin
+            if (rvviRefGprsCompare(idx, step_compare_if.riscy_GPR[idx]) != 0) begin
+               miscompare = 1;
+               `uvm_error("Step-and-Compare", $sformatf("GPR[%0d] Mismatch with Spike. RTL=0x%8h", idx, step_compare_if.riscy_GPR[idx]))
+            end
+         end
+`else
          if ((idx == insn_regs_write_addr) && (idx != 0) && (insn_regs_write_size == 1)) // Use register in insn_regs_write queue if it exists
             check_32bit(.compared(compared_str), .expected(step_compare_if.ovp_cpu_GPR[idx][31:0]), .actual(insn_regs_write_value));
          // FIXME:strichmo:I am removing the static (non-written) register checks, as they fail in presence of I and D bus RAM stalls
          // It would be highly desirable to find an alternative for this type of check to ensure unintended writes to do not
          else if (!is_stall_sim && !`CV32E40P_TRACER.insn_wb_bypass) // Use actual value from RTL to compare registers which should have not changed
             check_32bit(.compared(compared_str), .expected(step_compare_if.ovp_cpu_GPR[idx][31:0]), .actual(step_compare_if.riscy_GPR[idx]));
+`endif
          step_compare_if.num_gpr_checks++;
       end
 
       // Compare CSR's
+`ifdef ISS_SPIKE
+      if (!is_stall_sim) begin
+         if (step_compare_if.deferint_prime != 0) begin
+            if (rvviRefCsrCompare(12'h300, {`CV32E40P_CORE.cs_registers_i.mstatus_q.mprv, 4'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.mpp, 3'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.mpie, 2'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.upie, `CV32E40P_CORE.cs_registers_i.mstatus_q.mie, 2'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.uie}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mstatus CSR Mismatch"); end
+            if (rvviRefCsrCompare(12'h341, `CV32E40P_CORE.cs_registers_i.mepc_q) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mepc CSR Mismatch"); end
+            if (rvviRefCsrCompare(12'h342, {`CV32E40P_CORE.cs_registers_i.mcause_q[5], 26'b0, `CV32E40P_CORE.cs_registers_i.mcause_q[4:0]}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mcause CSR Mismatch"); end
+         end
+         if (rvviRefCsrCompare(12'h305, {`CV32E40P_CORE.cs_registers_i.mtvec_q, 6'h0, `CV32E40P_CORE.cs_registers_i.mtvec_mode_q}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mtvec CSR Mismatch"); end
+         if (rvviRefCsrCompare(12'h340, `CV32E40P_CORE.cs_registers_i.mscratch_q) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mscratch CSR Mismatch"); end
+      end
+`else
       foreach(`CV32E40P_RM_RVVI_STATE.csr[index]) begin
           step_compare_if.num_csr_checks++;
           ignore = 0;
@@ -377,6 +442,7 @@ module uvmt_cv32e40p_step_compare
             check_32bit(.compared(index), .expected(`CV32E40P_RM_RVVI_STATE.csr[index]), .actual(csr_val));
 
       end // foreach (ovp.cpu.csr[index])
+`endif
     endfunction // compare
 
     int cycles = 0;
@@ -390,6 +456,7 @@ module uvmt_cv32e40p_step_compare
         logic [ 5:0] gpr_addr;
         logic [31:0] gpr_value;
 
+`ifdef ISS_IMPERAS
         if (`CV32E40P_TRACER.insn_regs_write.size()) begin
           gpr_addr  = `CV32E40P_TRACER.insn_regs_write[0].addr;
           gpr_value = `CV32E40P_TRACER.insn_regs_write[0].value;
@@ -398,7 +465,18 @@ module uvmt_cv32e40p_step_compare
         // Pass cycles and reset
         `CV32E40P_RM.cycles = cycles;
         cycles = 0;
+`endif
     endfunction // pushRTL2RM
+
+   always @(step_compare_if.riscv_retire) begin
+      // check expected against actual
+      if (use_iss) begin
+`ifdef ISS_SPIKE
+         rvviRefEventStep();
+`endif
+         compare();
+      end
+   end
 
     /*
         The schedule works like this
@@ -458,7 +536,11 @@ module uvmt_cv32e40p_step_compare
           end
 
           RTL_VALID: begin
+`ifdef ISS_IMPERAS
               state <= RM_STEP;
+`else
+              state <= IDLE;
+`endif
           end
 
           RTL_TRAP: begin
@@ -472,7 +554,9 @@ module uvmt_cv32e40p_step_compare
 
           RM_STEP: begin
               pushRTL2RM("ret_rtl");
+`ifdef ISS_IMPERAS
               `CV32E40P_RM_RVVI_CONTROL.stepi();
+`endif
               fork
                   begin
                       @step_compare_if.ovp_cpu_valid;
@@ -480,6 +564,12 @@ module uvmt_cv32e40p_step_compare
                       state <= RM_VALID;
                   end
                   begin
+`ifdef ISS_IMPERAS
+   always @(step_compare_if.ovp_cpu_trap) begin
+       // TODO check exception against ISS
+       $display("Trap!!");
+   end
+`endif
                       @step_compare_if.ovp_cpu_trap;
                       state <= RM_TRAP;
                   end

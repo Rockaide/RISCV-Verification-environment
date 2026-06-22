@@ -342,7 +342,11 @@ function void uvme_cv32e40p_env_c::retrieve_vifs();
    // fixme:strichmo:This is a hack, that can be removed when RVFI/RVVI is enabled
    // This enables the vp_rnd_num_seq to backdoor update memories when a "volatile" register is read
    if (!uvm_config_db#(virtual RVVI_memory)::get(this, "", "rvvi_memory_vif", cntxt.rvvi_memory_vif)) begin
+`ifdef ISS_IMPERAS
       `uvm_fatal("VIF", $sformatf("Could not find rvvi_memory_vif handle of type %s in uvm_config_db", $typename(cntxt.rvvi_memory_vif)))
+`else
+      `uvm_warning("VIF", "Could not find rvvi_memory_vif. Ignoring since ISS_IMPERAS is not set.")
+`endif
    end
    else begin
       `uvm_info("VIF", $sformatf("Found rvvi_memory_vifhandle of type %s in uvm_config_db", $typename(cntxt.rvvi_memory_vif)), UVM_DEBUG)
