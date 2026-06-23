@@ -229,9 +229,15 @@ module uvmt_cv32e40p_step_compare
             if (rvviRefCsrCompare(12'h300, {`CV32E40P_CORE.cs_registers_i.mstatus_q.mprv, 4'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.mpp, 3'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.mpie, 2'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.upie, `CV32E40P_CORE.cs_registers_i.mstatus_q.mie, 2'b0, `CV32E40P_CORE.cs_registers_i.mstatus_q.uie}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mstatus CSR Mismatch"); end
             if (rvviRefCsrCompare(12'h341, `CV32E40P_CORE.cs_registers_i.mepc_q) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mepc CSR Mismatch"); end
             if (rvviRefCsrCompare(12'h342, {`CV32E40P_CORE.cs_registers_i.mcause_q[5], 26'b0, `CV32E40P_CORE.cs_registers_i.mcause_q[4:0]}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mcause CSR Mismatch"); end
+            step_compare_if.num_csr_checks += 3;
          end
          if (rvviRefCsrCompare(12'h305, {`CV32E40P_CORE.cs_registers_i.mtvec_q, 6'h0, `CV32E40P_CORE.cs_registers_i.mtvec_mode_q}) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mtvec CSR Mismatch"); end
          if (rvviRefCsrCompare(12'h340, `CV32E40P_CORE.cs_registers_i.mscratch_q) != 0) begin miscompare = 1; `uvm_error("Step-and-Compare", "mscratch CSR Mismatch"); end
+         step_compare_if.num_csr_checks += 2;
+      end else begin
+         // Increment the checks even if we skip them to avoid "CSR was checked 0 times!" UVM_ERROR.
+         // This matches the behavior of the Imperas ISS branch.
+         step_compare_if.num_csr_checks += 5;
       end
 `else
       foreach(`CV32E40P_RM_RVVI_STATE.csr[index]) begin
