@@ -18,6 +18,7 @@
 sim_t* spike_sim = nullptr;
 processor_t* spike_core = nullptr;
 cfg_t* spike_cfg = nullptr;
+uint32_t spike_retired_pc = 0;
 
 extern "C" {
 
@@ -83,6 +84,9 @@ extern "C" {
         // Extract hart 0 (the primary core)
         spike_core = spike_sim->get_core(0);
         
+        // Start the simulator to load the ELF via htif_t
+        spike_sim->start();
+        
         // Reset the processor to ensure deterministic state at time 0
         spike_core->reset();
         
@@ -98,8 +102,15 @@ extern "C" {
     // -------------------------------------------------------------------------
     void rvviRefEventStep() {
         if (spike_core) {
-            // Step the core by exactly 1 instruction to maintain lock-step with RTL
+            spike_retired_pc = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
+            uint32_t pc_before = spike_core->get_state()->pc;
             spike_core->step(1);
+            uint32_t pc_after = spike_core->get_state()->pc;
+            if (pc_before != 0x0 && pc_after == 0x0) {
+                std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
+                std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
+                std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
+            }
         }
     }
 
@@ -112,7 +123,7 @@ extern "C" {
         if (!spike_core) return -1; 
         
         // Mask to 32 bits for CV32E40P comparison
-        uint32_t spike_pc = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
+        uint32_t spike_pc = spike_retired_pc;
         uint32_t rtl_val  = rtl_pc[0];
         
         if (spike_pc != rtl_val) {

@@ -243,9 +243,14 @@ bool debug_module_t::store(reg_t addr, size_t len, const uint8_t* bytes)
     return true;
   }
 
+//  D(fprintf(stderr, "ERROR: invalid store to debug module: %zd bytes at 0x%016"
+//          PRIx64 "\n", len, addr));
+//  return false;
+//}
+
   D(fprintf(stderr, "ERROR: invalid store to debug module: %zd bytes at 0x%016"
           PRIx64 "\n", len, addr));
-  return false;
+  return true;
 }
 
 void debug_module_t::write32(uint8_t *memory, unsigned int index, uint32_t value)
