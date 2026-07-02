@@ -14,26 +14,71 @@
 #include "riscv/cfg.h"
 #include "riscv/Params.h"
 
+#include <fstream>
+#include <sstream>
+#include "vpi_user.h"
+
 // Global pointers to hold the Spike simulation instance and configuration
 sim_t* spike_sim = nullptr;
 processor_t* spike_core = nullptr;
 cfg_t* spike_cfg = nullptr;
 uint32_t spike_retired_pc = 0;
+uint32_t write_tohost_addr = 0;
 
 extern "C" {
 
     // -------------------------------------------------------------------------
     // 1. Initialization
     // -------------------------------------------------------------------------
-    void rvviRefInit(const char* isa, const char* elf_file) {
+    void rvviRefInit(const char* isa, const char* elf_file, const char* nm_file) {
         std::cout << "[DPI-C] Initializing Spike Reference Model..." << std::endl;
         
+        // Parse nm_file to find write_tohost if provided
+        if (nm_file && nm_file[0] != '\0') {
+            std::ifstream nm_stream(nm_file);
+            std::string line;
+            while (std::getline(nm_stream, line)) {
+                // Line format typically: <address> <type> <symbol_name>
+                std::istringstream iss(line);
+                std::string addr_str, type_str, sym_name;
+                if (iss >> addr_str >> type_str >> sym_name) {
+                    if (sym_name == "write_tohost") {
+                        write_tohost_addr = std::stoul(addr_str, nullptr, 16);
+                        std::cout << "[DPI-C] Found write_tohost at 0x" << std::hex << write_tohost_addr << std::endl;
+                    }
+                }
+            }
+        }
+        
+        // Fallback: If nm_file was missing or failed, run nm directly on the ELF file
+        if (write_tohost_addr == 0 && elf_file) {
+            char cmd[1024];
+            snprintf(cmd, sizeof(cmd), "/home/rocca/tools/corev/corev-openhw-gcc-rocky8-20240530/bin/riscv32-corev-elf-nm %s", elf_file);
+            FILE* fp = popen(cmd, "r");
+            if (fp) {
+                char line[512];
+                while (fgets(line, sizeof(line), fp)) {
+                    std::istringstream iss(line);
+                    std::string addr_str, type_str, sym_name;
+                    if (iss >> addr_str >> type_str >> sym_name) {
+                        if (sym_name == "write_tohost") {
+                            write_tohost_addr = std::stoul(addr_str, nullptr, 16);
+                            std::cout << "[DPI-C] Found write_tohost (via riscv32-corev-elf-nm) at 0x" << std::hex << write_tohost_addr << std::endl;
+                            break;
+                        }
+                    }
+                }
+                pclose(fp);
+            }
+        }
+
         // Target CV32E40P capabilities
         std::string target_isa = isa ? isa : "RV32IMFC";
         
-        // Configure Spike memory: 512MB starting at 0x0
+        // Configure Spike memory: cover up to 0x21000000 to include test_ret_val at 0x20000000
         std::vector<mem_cfg_t> mem_layout;
-        mem_layout.push_back(mem_cfg_t(0x00000000, 0x20000000));
+        mem_layout.push_back(mem_cfg_t(0x00000000, 0x21000000));
+        mem_layout.push_back(mem_cfg_t(0x1A111000, 0x10000));
         std::vector<size_t> hartids = {0}; // 1 hart with ID 0
         spike_cfg = new cfg_t(
             std::make_pair((reg_t)0, (reg_t)0), // default_initrd_bounds
@@ -61,6 +106,10 @@ extern "C" {
         // Setup modern Spike sim_t arguments
         std::vector<std::pair<reg_t, mem_t*>> mems;
         mems.push_back(std::make_pair(0x00000000, new mem_t(0x20000000)));
+        // Spike's bus_t resolves accesses using upper_bound(). It routes accesses after 
+        // 0x1A110000 to the 4KB debug_module, inadvertently hiding the RAM mapped at 0x0.
+        // We explicitly map the 0x1A111000 region so bus_t properly resolves the .debugger_exception section.
+        mems.push_back(std::make_pair(0x1A111000, new mem_t(0x10000)));
         std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
         debug_module_config_t dmc; 
         openhw::Params params;
@@ -106,6 +155,26 @@ extern "C" {
             uint32_t pc_before = spike_core->get_state()->pc;
             spike_core->step(1);
             uint32_t pc_after = spike_core->get_state()->pc;
+            
+            // -----------------------------------------------------------------------
+            // IMPERAS REFERENCE: How the default ISS handles riscv-dv completion
+            // -----------------------------------------------------------------------
+            // In Imperas OVPsim, there is a vendor_lib/imperas/design/monitor.sv module
+            // that intercepts instruction fetches at the `write_tohost` address:
+            //
+            //     nm_get("write_tohost", _test_exit);
+            //     ...
+            //     if (_test_exit.enable && bus.IAddr==_test_exit.addr) begin
+            //         if (!io.Shutdown) $display("Fetch: Exit Label");
+            //         io.Shutdown = 1;
+            //     end
+            //
+            // When io.Shutdown=1, Imperas forcefully terminates the test. 
+            // However, core-v-verif riscv-dv BSP tests actually end in an exception handler
+            // that executes WFI with MIE=0 to halt the core. Spike can natively detect this
+            // via is_waiting_for_interrupt().
+            // -----------------------------------------------------------------------
+            
             if (pc_before != 0x0 && pc_after == 0x0) {
                 std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
                 std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;

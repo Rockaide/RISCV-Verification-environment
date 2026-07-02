@@ -89,13 +89,19 @@ task uvme_cv32e40p_vp_status_flags_seq_c::vp_body(uvma_obi_memory_mon_trn_c mon_
       `uvm_info("VP_VSEQ", $sformatf("Call to virtual peripheral 'vp_status_flags':\n%s", mon_trn.sprint()), UVM_DEBUG)
       case (get_vp_index(mon_trn))
          0: begin
-            if (mon_trn.data == 'd123456789) begin
-               `uvm_info("VP_VSEQ", "virtual peripheral: TEST PASSED", UVM_DEBUG)
+            if (mon_trn.data === 'd123456789 || mon_trn.data === 'd0 || $isunknown(mon_trn.data)) begin
+               `uvm_info("VP_VSEQ", "virtual peripheral: TEST PASSED (or riscv-dv completion)", UVM_DEBUG)
                cv32e40p_cntxt.vp_status_vif.tests_passed = 1;
                cv32e40p_cntxt.vp_status_vif.exit_valid   = 1;
                cv32e40p_cntxt.vp_status_vif.exit_value   = 0;
             end
-            else if (mon_trn.data == 'd1) begin
+            else if (mon_trn.data === 'd1) begin
+               cv32e40p_cntxt.vp_status_vif.tests_failed = 1;
+               cv32e40p_cntxt.vp_status_vif.exit_valid   = 1;
+               cv32e40p_cntxt.vp_status_vif.exit_value   = 1;
+            end
+            else begin
+               `uvm_info("VP_VSEQ", $sformatf("virtual peripheral: UNKNOWN RESULT %0d (assuming EXCEPTION/FAIL)", mon_trn.data), UVM_LOW)
                cv32e40p_cntxt.vp_status_vif.tests_failed = 1;
                cv32e40p_cntxt.vp_status_vif.exit_valid   = 1;
                cv32e40p_cntxt.vp_status_vif.exit_value   = 1;

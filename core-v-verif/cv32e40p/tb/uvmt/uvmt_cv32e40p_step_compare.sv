@@ -64,7 +64,7 @@ import uvm_pkg::*;      // needed for the UVM messaging service (`uvm_info(), et
 `endif
 
 `ifdef ISS_SPIKE
-import "DPI-C" context function void rvviRefInit(string isa, string elf_file);
+import "DPI-C" context function void rvviRefInit(string isa, string elf_file, string nm_file);
 import "DPI-C" context function void rvviRefEventStep();
 import "DPI-C" context function int rvviRefPcCompare(input bit [31:0] rtl_pc);
 import "DPI-C" context function int rvviRefGprsCompare(input int reg_index, input bit [31:0] rtl_reg_val);
@@ -118,12 +118,18 @@ module uvmt_cv32e40p_step_compare
 
 `ifdef ISS_SPIKE
   string elf_file;
+  string nm_file;
   initial begin
     wait (clknrst_if.reset_n === 1'b0);
     wait (clknrst_if.reset_n === 1'b1);
     if ($value$plusargs("elf_file=%s", elf_file)) begin
       `uvm_info("Step-and-Compare", $sformatf("Initializing Spike with ELF: %s", elf_file), UVM_NONE)
-      rvviRefInit("RV32IMC", elf_file);
+      if ($value$plusargs("nm_file=%s", nm_file)) begin
+        rvviRefInit("RV32IMC", elf_file, nm_file);
+      end else begin
+        `uvm_info("Step-and-Compare", "No +nm_file specified, passing empty string", UVM_NONE)
+        rvviRefInit("RV32IMC", elf_file, "");
+      end
     end else begin
       `uvm_fatal("Step-and-Compare", "No +elf_file specified for Spike ISS!")
     end
