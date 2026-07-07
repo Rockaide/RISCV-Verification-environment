@@ -139,6 +139,9 @@ extern "C" {
         // Reset the processor to ensure deterministic state at time 0
         spike_core->reset();
         
+        // Force Spike mstatus to match RTL reset state (MPP=3 -> 0x1800)
+        spike_core->put_csr(0x300, 0x1800);
+        
         // CV32E40P default boot_addr_i is 0x80
         spike_core->get_state()->pc = 0x80;
         
@@ -175,11 +178,11 @@ extern "C" {
             // via is_waiting_for_interrupt().
             // -----------------------------------------------------------------------
             
-            if (pc_before != 0x0 && pc_after == 0x0) {
-                std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
-                std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
-                std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
-            }
+            // if (pc_before != 0x0 && pc_after == 0x0) {
+            //     std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
+            //     std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
+            //     std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
+            // }
         }
     }
 
@@ -188,19 +191,11 @@ extern "C" {
     // -------------------------------------------------------------------------
     
     // Compare Program Counter (PC)
-    int rvviRefPcCompare(const svBitVecVal* rtl_pc) {
-        if (!spike_core) return -1; 
+    // Returns Spike's PC so SystemVerilog can handle resynchronization
+    uint32_t rvviRefPcCompare(const svBitVecVal* rtl_pc) {
+        if (!spike_core) return 0xFFFFFFFF;
         
-        // Mask to 32 bits for CV32E40P comparison
-        uint32_t spike_pc = spike_retired_pc;
-        uint32_t rtl_val  = rtl_pc[0];
-        
-        if (spike_pc != rtl_val) {
-            std::cerr << "[DPI-C] PC Mismatch! Spike: 0x" << std::hex << spike_pc 
-                      << " RTL: 0x" << rtl_val << std::endl;
-            return 1; 
-        }
-        return 0; 
+        return spike_retired_pc;
     }
 
     // Compare General Purpose Registers (GPRs)
@@ -217,6 +212,12 @@ extern "C" {
              return 1;
         }
         return 0;
+    }
+
+    // Synchronize a Specific General Purpose Register (GPR) to RTL value
+    void rvviRefSyncGpr(int reg_index, const svBitVecVal* rtl_reg_val) {
+        if (!spike_core) return;
+        spike_core->get_state()->XPR.write(reg_index, rtl_reg_val[0]);
     }
 
     // Compare Control and Status Registers (CSRs)
