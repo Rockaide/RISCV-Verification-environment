@@ -13,7 +13,27 @@
 #include "riscv/mmu.h"
 #include "riscv/cfg.h"
 #include "riscv/Params.h"
+#include "riscv/csrs.h"
 
+class cv32e40p_dcsr_t : public dcsr_csr_t {
+public:
+    cv32e40p_dcsr_t(processor_t* const proc, const reg_t addr) : dcsr_csr_t(proc, addr) {}
+    bool unlogged_write(const reg_t val) noexcept override {
+        reg_t current = read();
+        // Writable bits in CV32E40P: ebreakm(15), ebreaku(12), stepie(11), step(2), prv(1:0)
+        reg_t mask = 0x9807; 
+        reg_t new_val = (current & ~mask) | (val & mask);
+        return dcsr_csr_t::unlogged_write(new_val);
+    }
+};
+
+class custom_trap_t : public trap_t {
+    reg_t tval;
+public:
+    custom_trap_t(reg_t cause, reg_t tval) : trap_t(cause), tval(tval) {}
+    bool has_tval() override { return true; }
+    reg_t get_tval() override { return tval; }
+};
 #include <fstream>
 #include <sstream>
 #include "vpi_user.h"
@@ -106,6 +126,7 @@ extern "C" {
         // Setup modern Spike sim_t arguments
         std::vector<std::pair<reg_t, mem_t*>> mems;
         mems.push_back(std::make_pair(0x00000000, new mem_t(0x20000000)));
+        mems.push_back(std::make_pair(0x20000000, new mem_t(0x01000000)));
         // Spike's bus_t resolves accesses using upper_bound(). It routes accesses after 
         // 0x1A110000 to the 4KB debug_module, inadvertently hiding the RAM mapped at 0x0.
         // We explicitly map the 0x1A111000 region so bus_t properly resolves the .debugger_exception section.
@@ -141,6 +162,20 @@ extern "C" {
         
         // Force Spike mstatus to match RTL reset state (MPP=3 -> 0x1800)
         spike_core->put_csr(0x300, 0x1800);
+        
+        // Statically configure Spike to match CV32E40P's dcsr restrictions
+        auto cv32_dcsr = std::make_shared<cv32e40p_dcsr_t>(spike_core, 0x7b0);
+        spike_core->get_state()->csrmap[0x7b0] = cv32_dcsr;
+        spike_core->get_state()->dcsr = cv32_dcsr;
+        
+        // Statically configure Spike's Machine Information CSRs to match CV32E40P identity
+        spike_core->get_state()->csrmap[0xF11] = std::make_shared<const_csr_t>(spike_core, 0xF11, 0x00000602); // mvendorid
+        spike_core->get_state()->csrmap[0xF12] = std::make_shared<const_csr_t>(spike_core, 0xF12, 0x00000004); // marchid
+        spike_core->get_state()->csrmap[0xF13] = std::make_shared<const_csr_t>(spike_core, 0xF13, 0x00000000); // mimpid
+        
+        // Force misa to strictly match the CV32E40P configured value
+        // Spike uses state.misa internally, but the guest will read from csrmap
+        spike_core->get_state()->csrmap[0x301] = std::make_shared<const_csr_t>(spike_core, 0x301, 0x40001104);
         
         // CV32E40P default boot_addr_i is 0x80
         spike_core->get_state()->pc = 0x80;
@@ -214,10 +249,19 @@ extern "C" {
         return 0;
     }
 
-    // Synchronize a Specific General Purpose Register (GPR) to RTL value
-    void rvviRefSyncGpr(int reg_index, const svBitVecVal* rtl_reg_val) {
+    // Explicitly notify Spike when the RTL takes a trap
+    void rvviRefInjectTrap(int cause, int epc, int tval) {
         if (!spike_core) return;
-        spike_core->get_state()->XPR.write(reg_index, rtl_reg_val[0]);
+        std::cout << "[DPI-C] Spike injecting trap: cause=0x" << std::hex << cause 
+                  << " epc=0x" << epc << " tval=0x" << tval << std::endl;
+                  
+        class processor_t_public : public processor_t {
+        public:
+            using processor_t::take_trap;
+        };
+        
+        custom_trap_t t(cause, tval);
+        static_cast<processor_t_public*>(spike_core)->take_trap(t, epc);
     }
 
     // Compare Control and Status Registers (CSRs)
