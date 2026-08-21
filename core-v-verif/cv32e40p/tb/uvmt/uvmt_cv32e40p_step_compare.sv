@@ -65,11 +65,10 @@ import uvm_pkg::*;      // needed for the UVM messaging service (`uvm_info(), et
 
 `ifdef ISS_SPIKE
 import "DPI-C" context function void rvviRefInit(string isa, string elf_file, string nm_file);
-import "DPI-C" context function void rvviRefEventStep();
+import "DPI-C" context function void rvviRefEventStep(input bit [31:0] irq_i, input int halt_request, input int deferint);
 import "DPI-C" context function int rvviRefPcCompare(input bit [31:0] rtl_pc);
 import "DPI-C" context function int rvviRefGprsCompare(input int reg_index, input bit [31:0] rtl_reg_val);
 import "DPI-C" context function int rvviRefCsrCompare(input int csr_address, input bit [31:0] rtl_csr_val);
-import "DPI-C" context function void rvviRefInjectTrap(input int cause, input int epc, input int tval);
 import "DPI-C" context function void rvviRefShutdown();
 `endif
 
@@ -168,6 +167,12 @@ module uvmt_cv32e40p_step_compare
       end
    endfunction // check_32bit
 
+   // PC History Buffer
+   bit [31:0] pc_history_spike [45];
+   bit [31:0] pc_history_rtl [45];
+   int pc_history_idx = 0;
+   int pc_history_count = 0;
+
    function automatic void compare();
       int idx;
       logic [ 5:0] insn_regs_write_addr;
@@ -181,9 +186,22 @@ module uvmt_cv32e40p_step_compare
       // Compare PC
 `ifdef ISS_SPIKE
       int spike_pc = rvviRefPcCompare(step_compare_if.insn_pc);
+      
+      pc_history_spike[pc_history_idx] = spike_pc;
+      pc_history_rtl[pc_history_idx] = step_compare_if.insn_pc;
+      pc_history_idx = (pc_history_idx + 1) % 45;
+      if (pc_history_count < 45) pc_history_count++;
+
       if (spike_pc != step_compare_if.insn_pc) begin
+         string hist_str = "";
          miscompare = 1;
-         `uvm_error("Step-and-Compare", $sformatf("PC Mismatch detected! Spike: 0x%08x RTL: 0x%08x.", spike_pc, step_compare_if.insn_pc))
+         hist_str = $sformatf("PC Mismatch detected! Spike: 0x%08x RTL: 0x%08x.\n--- PC HISTORY DUMP (Last %0d PCs) ---\n", spike_pc, step_compare_if.insn_pc, pc_history_count);
+         for (int i = 0; i < pc_history_count; i++) begin
+            int print_idx = (pc_history_idx - pc_history_count + i + 45) % 45;
+            hist_str = {hist_str, $sformatf("  [T-%0d] Spike PC: 0x%08x | RTL PC: 0x%08x\n", (pc_history_count - i), pc_history_spike[print_idx], pc_history_rtl[print_idx])};
+         end
+         hist_str = {hist_str, "--------------------------------------"};
+         `uvm_error("Step-and-Compare", hist_str)
       end
 `else
       check_32bit(.compared("PC"), .expected(`CV32E40P_RM_RVVI_STATE.pc), .actual(step_compare_if.insn_pc));
@@ -482,30 +500,13 @@ module uvmt_cv32e40p_step_compare
 `endif
     endfunction // pushRTL2RM
 
-   always @(step_compare_if.riscv_trap) begin
-`ifdef ISS_SPIKE
-      int cause;
-      int tval;
-      int epc;
-      // In CV32E40P, mcause_q bit 5 is interrupt flag, bits 4:0 are exception code
-      cause = (`CV32E40P_CORE.cs_registers_i.mcause_q[5] << 31) | `CV32E40P_CORE.cs_registers_i.mcause_q[4:0];
-      epc = `CV32E40P_CORE.cs_registers_i.mepc_q;
-      // CV32E40P doesn't implement mtval_q natively. Pass 0 for standard exceptions and insn_pc for breakpoints.
-      if ((cause & 31'h7FFFFFFF) == 3) begin // Breakpoint
-         tval = step_compare_if.insn_pc;
-      end else begin
-         tval = 0;
-      end
-      
-      rvviRefInjectTrap(cause, epc, tval);
-`endif
-   end
+
 
    always @(step_compare_if.riscv_retire) begin
       // check expected against actual
       if (use_iss) begin
 `ifdef ISS_SPIKE
-         rvviRefEventStep();
+         rvviRefEventStep(`CV32E40P_CORE.irq_i, `CV32E40P_CORE.debug_req_i, step_compare_if.deferint_prime);
 `endif
          compare();
       end

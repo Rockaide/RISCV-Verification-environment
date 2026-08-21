@@ -14,6 +14,21 @@
 #include "riscv/cfg.h"
 #include "riscv/Params.h"
 #include "riscv/csrs.h"
+#include "riscv/extension.h"
+
+// Global to hold physical pins
+uint32_t rtl_irq_pins = 0;
+
+// Path 1: Custom MIP CSR proxy
+class cv32e40p_mip_t : public basic_csr_t {
+public:
+    cv32e40p_mip_t(processor_t* const proc, const reg_t addr) : basic_csr_t(proc, addr, 0) {}
+    
+    // Always return the physical pins masked by CV32E40P's implemented interrupt mask
+    reg_t read() const noexcept override {
+        return (rtl_irq_pins & 0xFFFF0888);
+    }
+};
 
 class cv32e40p_dcsr_t : public dcsr_csr_t {
 public:
@@ -27,13 +42,7 @@ public:
     }
 };
 
-class custom_trap_t : public trap_t {
-    reg_t tval;
-public:
-    custom_trap_t(reg_t cause, reg_t tval) : trap_t(cause), tval(tval) {}
-    bool has_tval() override { return true; }
-    reg_t get_tval() override { return tval; }
-};
+
 #include <fstream>
 #include <sstream>
 #include "vpi_user.h"
@@ -143,7 +152,7 @@ extern "C" {
             plugin_devices,       // plugin devices
             args,                 // executable and arguments
             dmc,                  // debug module configuration
-            nullptr,              // log path
+            "spike_log",          // log path
             false,                // dtb_enabled (typically false for bare-metal DV)
             nullptr,              // dtb_file
             false,                // socket_enabled
@@ -151,8 +160,14 @@ extern "C" {
             params                // openhw::Params
         );
                               
+        //Enables the trace log for Spike
+        spike_sim->configure_log(true, true);
+
         // Extract hart 0 (the primary core)
         spike_core = spike_sim->get_core(0);
+        
+        // Enable disassembly in the log
+        spike_core->set_debug(true);
         
         // Start the simulator to load the ELF via htif_t
         spike_sim->start();
@@ -177,6 +192,10 @@ extern "C" {
         // Spike uses state.misa internally, but the guest will read from csrmap
         spike_core->get_state()->csrmap[0x301] = std::make_shared<const_csr_t>(spike_core, 0x301, 0x40001104);
         
+        // Register the CV32E40P custom mip CSR proxy
+        auto cv32_mip = std::make_shared<cv32e40p_mip_t>(spike_core, 0x344);
+        spike_core->get_state()->csrmap[0x344] = cv32_mip;
+        
         // CV32E40P default boot_addr_i is 0x80
         spike_core->get_state()->pc = 0x80;
         
@@ -187,8 +206,31 @@ extern "C" {
     // -------------------------------------------------------------------------
     // 2. Execution
     // -------------------------------------------------------------------------
-    void rvviRefEventStep() {
+    void rvviRefEventStep(const svBitVecVal* irq_i_ptr, int halt_request, int deferint) {
         if (spike_core) {
+            uint32_t irq_i = irq_i_ptr[0];
+            // Update global pins for Path 1 (Software Read)
+            rtl_irq_pins = irq_i;
+
+            uint32_t current_pc = spike_core->get_state()->pc;
+            if (current_pc == 0x1234 || current_pc == 0x1238 || current_pc == 0xc) {
+                std::cout << "[DPI-C] rvviRefEventStep PC=0x" << std::hex << current_pc 
+                          << " deferint=" << std::dec << deferint 
+                          << " irq_i=0x" << std::hex << irq_i << std::endl;
+            }
+            
+            // Apply Halt Request natively
+            spike_core->halt_request = (halt_request != 0) ? processor_t::HR_REGULAR : processor_t::HR_NONE;
+            
+            // Path 2: Trap Evaluation Gating
+            if (deferint) {
+                // RTL is deferring, prevent Spike from trapping by clearing the internal engine's mip
+                spike_core->get_state()->mip->backdoor_write_with_mask(0xFFFFFFFF, 0);
+            } else {
+                // RTL acknowledges trap, expose masked pins to Spike's trap engine
+                spike_core->get_state()->mip->backdoor_write_with_mask(0xFFFFFFFF, irq_i & 0xFFFF0888);
+            }
+            
             spike_retired_pc = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
             uint32_t pc_before = spike_core->get_state()->pc;
             spike_core->step(1);
@@ -249,20 +291,7 @@ extern "C" {
         return 0;
     }
 
-    // Explicitly notify Spike when the RTL takes a trap
-    void rvviRefInjectTrap(int cause, int epc, int tval) {
-        if (!spike_core) return;
-        std::cout << "[DPI-C] Spike injecting trap: cause=0x" << std::hex << cause 
-                  << " epc=0x" << epc << " tval=0x" << tval << std::endl;
-                  
-        class processor_t_public : public processor_t {
-        public:
-            using processor_t::take_trap;
-        };
-        
-        custom_trap_t t(cause, tval);
-        static_cast<processor_t_public*>(spike_core)->take_trap(t, epc);
-    }
+
 
     // Compare Control and Status Registers (CSRs)
     int rvviRefCsrCompare(int csr_address, const svBitVecVal* rtl_csr_val) {
