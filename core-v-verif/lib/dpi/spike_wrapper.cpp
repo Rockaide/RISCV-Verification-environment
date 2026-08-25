@@ -108,6 +108,13 @@ extern "C" {
         // Target CV32E40P capabilities
         std::string target_isa = isa ? isa : "RV32IMFC";
         
+        // CV32E40P supports Zifencei, but Spike's ISA parser doesn't
+        // automatically enable it for RV32IMC, so we append it explicitly.
+        if (target_isa.find("zifencei") == std::string::npos && 
+            target_isa.find("Zifencei") == std::string::npos) {
+            target_isa += "_zifencei";
+        }
+        
         // Configure Spike memory: cover up to 0x21000000 to include test_ret_val at 0x20000000
         std::vector<mem_cfg_t> mem_layout;
         mem_layout.push_back(mem_cfg_t(0x00000000, 0x21000000));
