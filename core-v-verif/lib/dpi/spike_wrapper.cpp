@@ -27,6 +27,19 @@ public:
     }
 };
 
+class cv32e40p_mtvec_t : public tvec_csr_t {
+public:
+    cv32e40p_mtvec_t(processor_t* const proc, const reg_t addr) : tvec_csr_t(proc, addr) {}
+    bool unlogged_write(const reg_t val) noexcept override {
+        // CV32E40P hardware restricts mtvec to 256-byte aligned base addresses.
+        // Bits 31:8 are RW for BASE. Bit 0 is RW for MODE.
+        // Bits 7:1 are hardwired to 0.
+        reg_t mask = 0xFFFFFF01;
+        reg_t new_val = val & mask;
+        return tvec_csr_t::unlogged_write(new_val);
+    }
+};
+
 class custom_trap_t : public trap_t {
     reg_t tval;
 public:
@@ -158,7 +171,7 @@ extern "C" {
         spike_core = spike_sim->get_core(0);
         
         // Enable disassembly in the log
-        spike_core->set_debug(true)
+        spike_core->set_debug(true);
         
         // Start the simulator to load the ELF via htif_t
         spike_sim->start();
@@ -173,6 +186,12 @@ extern "C" {
         auto cv32_dcsr = std::make_shared<cv32e40p_dcsr_t>(spike_core, 0x7b0);
         spike_core->get_state()->csrmap[0x7b0] = cv32_dcsr;
         spike_core->get_state()->dcsr = cv32_dcsr;
+        
+        // Statically configure Spike's mtvec to match CV32E40P's 256-byte alignment restriction
+        auto cv32_mtvec = std::make_shared<cv32e40p_mtvec_t>(spike_core, 0x305);
+        spike_core->get_state()->csrmap[0x305] = cv32_mtvec;
+        spike_core->get_state()->mtvec = cv32_mtvec;
+
         
         // Statically configure Spike's Machine Information CSRs to match CV32E40P identity
         spike_core->get_state()->csrmap[0xF11] = std::make_shared<const_csr_t>(spike_core, 0xF11, 0x00000602); // mvendorid
