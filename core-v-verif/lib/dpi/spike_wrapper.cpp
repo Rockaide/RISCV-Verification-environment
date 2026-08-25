@@ -143,16 +143,22 @@ extern "C" {
             plugin_devices,       // plugin devices
             args,                 // executable and arguments
             dmc,                  // debug module configuration
-            nullptr,              // log path
+            "spike_log",          // log path
             false,                // dtb_enabled (typically false for bare-metal DV)
             nullptr,              // dtb_file
             false,                // socket_enabled
             nullptr,              // cmd_file
             params                // openhw::Params
         );
+        
+        //Enables the trace log for Spike
+        spike_sim->configure_log(true, true);
                               
         // Extract hart 0 (the primary core)
         spike_core = spike_sim->get_core(0);
+        
+        // Enable disassembly in the log
+        spike_core->set_debug(true)
         
         // Start the simulator to load the ELF via htif_t
         spike_sim->start();
@@ -278,6 +284,18 @@ extern "C" {
             return 1;
         }
         return 0;
+    }
+
+    // Get Spike's value for a given GPR index
+    int rvviRefGetGpr(int reg_index) {
+        if (!spike_core) return 0;
+        return (int)(spike_core->get_state()->XPR[reg_index] & 0xFFFFFFFF);
+    }
+
+    // Get Spike's value for a given CSR address
+    int rvviRefGetCsr(int csr_address) {
+        if (!spike_core) return 0;
+        return (int)(spike_core->get_csr(csr_address) & 0xFFFFFFFF);
     }
 
     // -------------------------------------------------------------------------
