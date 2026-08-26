@@ -13,7 +13,40 @@
 #include "riscv/mmu.h"
 #include "riscv/cfg.h"
 #include "riscv/Params.h"
+#include "riscv/csrs.h"
 
+class cv32e40p_dcsr_t : public dcsr_csr_t {
+public:
+    cv32e40p_dcsr_t(processor_t* const proc, const reg_t addr) : dcsr_csr_t(proc, addr) {}
+    bool unlogged_write(const reg_t val) noexcept override {
+        reg_t current = read();
+        // Writable bits in CV32E40P: ebreakm(15), ebreaku(12), stepie(11), step(2), prv(1:0)
+        reg_t mask = 0x9807; 
+        reg_t new_val = (current & ~mask) | (val & mask);
+        return dcsr_csr_t::unlogged_write(new_val);
+    }
+};
+
+class cv32e40p_mtvec_t : public tvec_csr_t {
+public:
+    cv32e40p_mtvec_t(processor_t* const proc, const reg_t addr) : tvec_csr_t(proc, addr) {}
+    bool unlogged_write(const reg_t val) noexcept override {
+        // CV32E40P hardware restricts mtvec to 256-byte aligned base addresses.
+        // Bits 31:8 are RW for BASE. Bit 0 is RW for MODE.
+        // Bits 7:1 are hardwired to 0.
+        reg_t mask = 0xFFFFFF01;
+        reg_t new_val = val & mask;
+        return tvec_csr_t::unlogged_write(new_val);
+    }
+};
+
+class custom_trap_t : public trap_t {
+    reg_t tval;
+public:
+    custom_trap_t(reg_t cause, reg_t tval) : trap_t(cause), tval(tval) {}
+    bool has_tval() override { return true; }
+    reg_t get_tval() override { return tval; }
+};
 #include <fstream>
 #include <sstream>
 #include "vpi_user.h"
@@ -75,6 +108,13 @@ extern "C" {
         // Target CV32E40P capabilities
         std::string target_isa = isa ? isa : "RV32IMFC";
         
+        // CV32E40P supports Zifencei, but Spike's ISA parser doesn't
+        // automatically enable it for RV32IMC, so we append it explicitly.
+        if (target_isa.find("zifencei") == std::string::npos && 
+            target_isa.find("Zifencei") == std::string::npos) {
+            target_isa += "_zifencei";
+        }
+        
         // Configure Spike memory: cover up to 0x21000000 to include test_ret_val at 0x20000000
         std::vector<mem_cfg_t> mem_layout;
         mem_layout.push_back(mem_cfg_t(0x00000000, 0x21000000));
@@ -106,6 +146,7 @@ extern "C" {
         // Setup modern Spike sim_t arguments
         std::vector<std::pair<reg_t, mem_t*>> mems;
         mems.push_back(std::make_pair(0x00000000, new mem_t(0x20000000)));
+        mems.push_back(std::make_pair(0x20000000, new mem_t(0x01000000)));
         // Spike's bus_t resolves accesses using upper_bound(). It routes accesses after 
         // 0x1A110000 to the 4KB debug_module, inadvertently hiding the RAM mapped at 0x0.
         // We explicitly map the 0x1A111000 region so bus_t properly resolves the .debugger_exception section.
@@ -122,22 +163,51 @@ extern "C" {
             plugin_devices,       // plugin devices
             args,                 // executable and arguments
             dmc,                  // debug module configuration
-            nullptr,              // log path
+            "spike_log",          // log path
             false,                // dtb_enabled (typically false for bare-metal DV)
             nullptr,              // dtb_file
             false,                // socket_enabled
             nullptr,              // cmd_file
             params                // openhw::Params
         );
+        
+        //Enables the trace log for Spike
+        spike_sim->configure_log(true, true);
                               
         // Extract hart 0 (the primary core)
         spike_core = spike_sim->get_core(0);
+        
+        // Enable disassembly in the log
+        spike_core->set_debug(true);
         
         // Start the simulator to load the ELF via htif_t
         spike_sim->start();
         
         // Reset the processor to ensure deterministic state at time 0
         spike_core->reset();
+        
+        // Force Spike mstatus to match RTL reset state (MPP=3 -> 0x1800)
+        spike_core->put_csr(0x300, 0x1800);
+        
+        // Statically configure Spike to match CV32E40P's dcsr restrictions
+        auto cv32_dcsr = std::make_shared<cv32e40p_dcsr_t>(spike_core, 0x7b0);
+        spike_core->get_state()->csrmap[0x7b0] = cv32_dcsr;
+        spike_core->get_state()->dcsr = cv32_dcsr;
+        
+        // Statically configure Spike's mtvec to match CV32E40P's 256-byte alignment restriction
+        auto cv32_mtvec = std::make_shared<cv32e40p_mtvec_t>(spike_core, 0x305);
+        spike_core->get_state()->csrmap[0x305] = cv32_mtvec;
+        spike_core->get_state()->mtvec = cv32_mtvec;
+
+        
+        // Statically configure Spike's Machine Information CSRs to match CV32E40P identity
+        spike_core->get_state()->csrmap[0xF11] = std::make_shared<const_csr_t>(spike_core, 0xF11, 0x00000602); // mvendorid
+        spike_core->get_state()->csrmap[0xF12] = std::make_shared<const_csr_t>(spike_core, 0xF12, 0x00000004); // marchid
+        spike_core->get_state()->csrmap[0xF13] = std::make_shared<const_csr_t>(spike_core, 0xF13, 0x00000000); // mimpid
+        
+        // Force misa to strictly match the CV32E40P configured value
+        // Spike uses state.misa internally, but the guest will read from csrmap
+        spike_core->get_state()->csrmap[0x301] = std::make_shared<const_csr_t>(spike_core, 0x301, 0x40001104);
         
         // CV32E40P default boot_addr_i is 0x80
         spike_core->get_state()->pc = 0x80;
@@ -175,11 +245,11 @@ extern "C" {
             // via is_waiting_for_interrupt().
             // -----------------------------------------------------------------------
             
-            if (pc_before != 0x0 && pc_after == 0x0) {
-                std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
-                std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
-                std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
-            }
+            // if (pc_before != 0x0 && pc_after == 0x0) {
+            //     std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
+            //     std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
+            //     std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
+            // }
         }
     }
 
@@ -188,19 +258,11 @@ extern "C" {
     // -------------------------------------------------------------------------
     
     // Compare Program Counter (PC)
-    int rvviRefPcCompare(const svBitVecVal* rtl_pc) {
-        if (!spike_core) return -1; 
+    // Returns Spike's PC so SystemVerilog can handle resynchronization
+    uint32_t rvviRefPcCompare(const svBitVecVal* rtl_pc) {
+        if (!spike_core) return 0xFFFFFFFF;
         
-        // Mask to 32 bits for CV32E40P comparison
-        uint32_t spike_pc = spike_retired_pc;
-        uint32_t rtl_val  = rtl_pc[0];
-        
-        if (spike_pc != rtl_val) {
-            std::cerr << "[DPI-C] PC Mismatch! Spike: 0x" << std::hex << spike_pc 
-                      << " RTL: 0x" << rtl_val << std::endl;
-            return 1; 
-        }
-        return 0; 
+        return spike_retired_pc;
     }
 
     // Compare General Purpose Registers (GPRs)
@@ -219,6 +281,21 @@ extern "C" {
         return 0;
     }
 
+    // Explicitly notify Spike when the RTL takes a trap
+    void rvviRefInjectTrap(int cause, int epc, int tval) {
+        if (!spike_core) return;
+        std::cout << "[DPI-C] Spike injecting trap: cause=0x" << std::hex << cause 
+                  << " epc=0x" << epc << " tval=0x" << tval << std::endl;
+                  
+        class processor_t_public : public processor_t {
+        public:
+            using processor_t::take_trap;
+        };
+        
+        custom_trap_t t(cause, tval);
+        static_cast<processor_t_public*>(spike_core)->take_trap(t, epc);
+    }
+
     // Compare Control and Status Registers (CSRs)
     int rvviRefCsrCompare(int csr_address, const svBitVecVal* rtl_csr_val) {
         if (!spike_core) return -1;
@@ -233,6 +310,18 @@ extern "C" {
             return 1;
         }
         return 0;
+    }
+
+    // Get Spike's value for a given GPR index
+    int rvviRefGetGpr(int reg_index) {
+        if (!spike_core) return 0;
+        return (int)(spike_core->get_state()->XPR[reg_index] & 0xFFFFFFFF);
+    }
+
+    // Get Spike's value for a given CSR address
+    int rvviRefGetCsr(int csr_address) {
+        if (!spike_core) return 0;
+        return (int)(spike_core->get_csr(csr_address) & 0xFFFFFFFF);
     }
 
     // -------------------------------------------------------------------------
