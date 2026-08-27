@@ -40,6 +40,125 @@ public:
     }
 };
 
+class cv32e40p_mie_t : public mie_csr_t {
+public:
+    cv32e40p_mie_t(processor_t* const proc, const reg_t addr) : mie_csr_t(proc, addr) {}
+    reg_t write_mask() const noexcept override {
+        // CV32E40P uses [31:16] for custom fast interrupts.
+        // It is strictly an M-mode core, so we also allow standard MSIP (3), MTIP (7), and MEIP (11).
+        // 0x0888 = (1<<11) | (1<<7) | (1<<3).
+        return 0xFFFF0888;
+    }
+};
+
+class cv32e40p_mip_t : public mip_csr_t {
+public:
+    cv32e40p_mip_t(processor_t* const proc, const reg_t addr) : mip_csr_t(proc, addr) {}
+    reg_t write_mask() const noexcept override {
+        // In CV32E40P, the entire mip register is read-only from software 
+        // (it is driven directly by the hardware interrupt pins).
+        // Spike's testbench will use backdoor_write_with_mask() to inject interrupts.
+        return 0;
+    }
+};
+
+// Global flags to track CV32E40P configuration based on the ISA string passed by the testbench
+bool cv32_has_u = false;
+bool cv32_has_f = false;
+bool cv32_has_zfinx = false;
+
+/*
+ * cv32e40p_mstatus_proxy_t
+ * 
+ * Why this is needed:
+ * Spike natively enables bits in the mstatus register based on its internal ISA 
+ * parser (which can automatically enable User/Supervisor extensions by default, 
+ * unmasking fields like MPRV). However, CV32E40P restricts writable mstatus fields 
+ * based on specific RTL parameters (PULP_SECURE for User Mode, and FPU). Allowing 
+ * Spike to handle mstatus organically causes lockstep mismatches on CSR writes.
+ * 
+ * Why it's done this way:
+ * To avoid modifying Spike's base code, we use Spike's proxy_csr_t to intercept 
+ * mstatus reads and writes. To perfectly match the RTL, we bypass Spike's internal 
+ * extension logic, and explicitly parse the ISA string passed by the testbench 
+ * (captured in cv32_has_u, cv32_has_f) to mask bits strictly according to the CV32E40P manual.
+ */
+class cv32e40p_mstatus_proxy_t : public proxy_csr_t {
+    processor_t* proc_ptr;
+public:
+    cv32e40p_mstatus_proxy_t(processor_t* const proc, const reg_t addr, csr_t_p delegate) 
+        : proxy_csr_t(proc, addr, delegate), proc_ptr(proc) {}
+
+    reg_t read() const noexcept override {
+        reg_t val = proxy_csr_t::read();
+        
+        // Base mask: MPIE (7), MIE (3) -> 0x0088
+        reg_t mask = 0x00000088;
+        
+        if (cv32_has_u) {
+            // If User mode is enabled (PULP_SECURE=1), these fields become RW
+            // MPRV (17), MPP (12:11), UPIE (4), UIE (0)
+            mask |= 0x00021811;
+        }
+        
+        // Add FS (14:13) only if FPU is enabled and ZFINX is disabled
+        if (cv32_has_f && !cv32_has_zfinx) {
+            mask |= 0x00006000;
+        }
+        
+        reg_t new_val = val & mask;
+        
+        // MPP (12:11) is hardwired to 3 (Machine mode) ONLY if User mode is disabled
+        if (!cv32_has_u) {
+            new_val |= 0x00001800;
+        }
+        
+        // Debug logging (commented out for production):
+        // std::cout << "[DPI-C] mstatus proxy read: has_u=" << cv32_has_u 
+        //           << ", has_f=" << cv32_has_f 
+        //           << ", val=0x" << std::hex << val 
+        //           << ", mask=0x" << mask 
+        //           << ", new_val=0x" << new_val << std::dec << std::endl;
+                  
+        return new_val;
+    }
+
+protected:
+    bool unlogged_write(const reg_t val) noexcept override {
+        reg_t current = proxy_csr_t::read();
+        
+        // Base mask: MPIE (7), MIE (3) -> 0x0088
+        reg_t mask = 0x00000088;
+        
+        if (cv32_has_u) {
+            // If User mode is enabled, these fields become RW
+            mask |= 0x00021811;
+        }
+        
+        // Add FS (14:13) only if FPU is enabled and ZFINX is disabled
+        if (cv32_has_f && !cv32_has_zfinx) {
+            mask |= 0x00006000;
+        }
+        
+        reg_t new_val = (current & ~mask) | (val & mask);
+        
+        // Force MPP to 3 ONLY if User mode is disabled
+        if (!cv32_has_u) {
+            new_val = (new_val & ~0x00001800) | 0x00001800;
+        }
+        
+        // Debug logging (commented out for production):
+        // std::cout << "[DPI-C] mstatus proxy unlogged_write: has_u=" << cv32_has_u 
+        //           << ", has_f=" << cv32_has_f 
+        //           << ", current=0x" << std::hex << current 
+        //           << ", val_to_write=0x" << val 
+        //           << ", mask=0x" << mask 
+        //           << ", new_val=0x" << new_val << std::dec << std::endl;
+        
+        return proxy_csr_t::unlogged_write(new_val);
+    }
+};
+
 class custom_trap_t : public trap_t {
     reg_t tval;
 public:
@@ -108,6 +227,10 @@ extern "C" {
         // Target CV32E40P capabilities
         std::string target_isa = isa ? isa : "RV32IMFC";
         
+        cv32_has_u = (target_isa.find('U') != std::string::npos || target_isa.find('u') != std::string::npos);
+        cv32_has_f = (target_isa.find('F') != std::string::npos || target_isa.find('f') != std::string::npos);
+        cv32_has_zfinx = (target_isa.find("zfinx") != std::string::npos || target_isa.find("Zfinx") != std::string::npos);
+
         // CV32E40P supports Zifencei, but Spike's ISA parser doesn't
         // automatically enable it for RV32IMC, so we append it explicitly.
         if (target_isa.find("zifencei") == std::string::npos && 
@@ -186,8 +309,14 @@ extern "C" {
         // Reset the processor to ensure deterministic state at time 0
         spike_core->reset();
         
+        // Use proxy for mstatus to restrict readable and writable bits to CV32E40P
+        // RW bits: FS (14:13), MPP (12:11), MPIE (7), MIE (3) -> mask: 0x7888
+        auto mstatus_delegate = spike_core->get_state()->csrmap[0x300];
+        auto cv32_mstatus = std::make_shared<cv32e40p_mstatus_proxy_t>(spike_core, 0x300, mstatus_delegate);
+        spike_core->get_state()->csrmap[0x300] = cv32_mstatus;
+        
         // Force Spike mstatus to match RTL reset state (MPP=3 -> 0x1800)
-        spike_core->put_csr(0x300, 0x1800);
+        cv32_mstatus->write(0x1800);
         
         // Statically configure Spike to match CV32E40P's dcsr restrictions
         auto cv32_dcsr = std::make_shared<cv32e40p_dcsr_t>(spike_core, 0x7b0);
@@ -208,6 +337,28 @@ extern "C" {
         // Force misa to strictly match the CV32E40P configured value
         // Spike uses state.misa internally, but the guest will read from csrmap
         spike_core->get_state()->csrmap[0x301] = std::make_shared<const_csr_t>(spike_core, 0x301, 0x40001104);
+        
+        // Statically configure Spike's mie and mip for CV32E40P custom interrupts [31:16]
+        auto cv32_mie = std::make_shared<cv32e40p_mie_t>(spike_core, 0x304);
+        spike_core->get_state()->csrmap[0x304] = cv32_mie;
+        spike_core->get_state()->mie = cv32_mie;
+
+        auto cv32_mip = std::make_shared<cv32e40p_mip_t>(spike_core, 0x344);
+        spike_core->get_state()->csrmap[0x344] = cv32_mip;
+        spike_core->get_state()->mip = cv32_mip;
+
+        // Hardware Loop CSRs (0xCC0 - 0xCC6)
+        spike_core->get_state()->csrmap[0xCC0] = std::make_shared<basic_csr_t>(spike_core, 0xCC0, 0); // lpstart0
+        spike_core->get_state()->csrmap[0xCC1] = std::make_shared<basic_csr_t>(spike_core, 0xCC1, 0); // lpend0
+        spike_core->get_state()->csrmap[0xCC2] = std::make_shared<basic_csr_t>(spike_core, 0xCC2, 0); // lpcount0
+        spike_core->get_state()->csrmap[0xCC4] = std::make_shared<basic_csr_t>(spike_core, 0xCC4, 0); // lpstart1
+        spike_core->get_state()->csrmap[0xCC5] = std::make_shared<basic_csr_t>(spike_core, 0xCC5, 0); // lpend1
+        spike_core->get_state()->csrmap[0xCC6] = std::make_shared<basic_csr_t>(spike_core, 0xCC6, 0); // lpcount1
+
+        // PULP Custom Identifiers
+        spike_core->get_state()->csrmap[0xCD0] = std::make_shared<const_csr_t>(spike_core, 0xCD0, 0); // uhartid
+        spike_core->get_state()->csrmap[0xCD1] = std::make_shared<const_csr_t>(spike_core, 0xCD1, 3); // privlv (M-mode)
+        spike_core->get_state()->csrmap[0xCD2] = std::make_shared<const_csr_t>(spike_core, 0xCD2, 0); // zfinx
         
         // CV32E40P default boot_addr_i is 0x80
         spike_core->get_state()->pc = 0x80;
