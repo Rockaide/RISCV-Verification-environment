@@ -267,11 +267,28 @@ import "DPI-C" context function void rvviRefShutdown();
          end
          if (rvviRefCsrCompare(12'h305, {`CV32E40P_CORE.cs_registers_i.mtvec_q, 6'h0, `CV32E40P_CORE.cs_registers_i.mtvec_mode_q}) != 0) begin print_mismatch_history($sformatf("mtvec CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'h305))); end
          if (rvviRefCsrCompare(12'h340, `CV32E40P_CORE.cs_registers_i.mscratch_q) != 0) begin print_mismatch_history($sformatf("mscratch CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h340), `CV32E40P_CORE.cs_registers_i.mscratch_q)); end
-         step_compare_if.num_csr_checks += 2;
+         
+         if (rvviRefCsrCompare(12'h304, `CV32E40P_CORE.cs_registers_i.mie_q) != 0) begin print_mismatch_history($sformatf("mie CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h304), `CV32E40P_CORE.cs_registers_i.mie_q)); end
+         if (rvviRefCsrCompare(12'h344, `CV32E40P_CORE.cs_registers_i.mip) != 0) begin print_mismatch_history($sformatf("mip CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h344), `CV32E40P_CORE.cs_registers_i.mip)); end
+         if (rvviRefCsrCompare(12'hCD2, 32'h0) != 0) begin print_mismatch_history($sformatf("zfinx CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCD2))); end
+         
+         if (`CV32E40P_CORE.cs_registers_i.PULP_XPULP) begin
+            if (rvviRefCsrCompare(12'hCC0, `CV32E40P_CORE.cs_registers_i.hwlp_start_i[0]) != 0) begin print_mismatch_history($sformatf("lpstart0 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC0))); end
+            if (rvviRefCsrCompare(12'hCC1, `CV32E40P_CORE.cs_registers_i.hwlp_end_i[0]) != 0) begin print_mismatch_history($sformatf("lpend0 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC1))); end
+            if (rvviRefCsrCompare(12'hCC2, `CV32E40P_CORE.cs_registers_i.hwlp_cnt_i[0]) != 0) begin print_mismatch_history($sformatf("lpcount0 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC2))); end
+            if (rvviRefCsrCompare(12'hCC4, `CV32E40P_CORE.cs_registers_i.hwlp_start_i[1]) != 0) begin print_mismatch_history($sformatf("lpstart1 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC4))); end
+            if (rvviRefCsrCompare(12'hCC5, `CV32E40P_CORE.cs_registers_i.hwlp_end_i[1]) != 0) begin print_mismatch_history($sformatf("lpend1 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC5))); end
+            if (rvviRefCsrCompare(12'hCC6, `CV32E40P_CORE.cs_registers_i.hwlp_cnt_i[1]) != 0) begin print_mismatch_history($sformatf("lpcount1 CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCC6))); end
+            if (rvviRefCsrCompare(12'hCD0, `CV32E40P_CORE.cs_registers_i.hart_id_i) != 0) begin print_mismatch_history($sformatf("uhartid CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCD0))); end
+            if (rvviRefCsrCompare(12'hCD1, {30'h0, `CV32E40P_CORE.cs_registers_i.priv_lvl_q}) != 0) begin print_mismatch_history($sformatf("privlv CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCD1))); end
+            step_compare_if.num_csr_checks += 8;
+         end
+         
+         step_compare_if.num_csr_checks += 5;
       end else begin
          // Increment the checks even if we skip them to avoid "CSR was checked 0 times!" UVM_ERROR.
          // This matches the behavior of the Imperas ISS branch.
-         step_compare_if.num_csr_checks += 5;
+         step_compare_if.num_csr_checks += 8 + (`CV32E40P_CORE.cs_registers_i.PULP_XPULP ? 8 : 0);
       end
 `else
       foreach(`CV32E40P_RM_RVVI_STATE.csr[index]) begin
