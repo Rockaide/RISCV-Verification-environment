@@ -372,10 +372,56 @@ extern "C" {
     // -------------------------------------------------------------------------
     void rvviRefEventStep() {
         if (spike_core) {
-            spike_retired_pc = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
-            uint32_t pc_before = spike_core->get_state()->pc;
+            uint64_t minstret_before = spike_core->get_state()->minstret->read();
+            uint32_t pc_before = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
+            
             spike_core->step(1);
-            uint32_t pc_after = spike_core->get_state()->pc;
+            
+            // If Spike took a trap (synchronous exception or asynchronous interrupt)
+            // during the step, it did not successfully retire an instruction.
+            // We must step Spike forward through the trap handler until it actually 
+            // retires an instruction to stay in lockstep with the RTL's retirement stream.
+            while (spike_core->get_state()->minstret->read() == minstret_before) {
+                uint64_t mcause = spike_core->get_state()->mcause->read();
+                bool is_interrupt = (mcause & 0x80000000) != 0;
+                uint64_t cause = mcause & 0x7FFFFFFF;
+                
+                // Note: The CV32E40P documentation (pipeline.rst and exceptions_interrupts.rst) 
+                // does not explicitly document which pipeline stage detects each exception. 
+                // However, based on RTL inspection (cv32e40p_id_stage.sv) and standard RISC-V design 
+                // applied to the 4-stage pipeline described in pipeline.rst:
+                // 
+                // 1. Fetch/Decode Exceptions: Instruction address misaligned (0), Instruction access fault (1), 
+                //    and Illegal instruction (2) are detected in the Instruction Fetch (IF) or 
+                //    Instruction Decode (ID) stages. These instructions are dropped before Execution.
+                //    Because the behavioral tracer only creates a "log of the executed instructions" 
+                //    (as per tracer.rst), it does not log these dropped instructions, emitting no retire event,
+                //    only logging those that reach the EX stage.
+                // 
+                // 2. Execute Exceptions: Synchronous exceptions like ecall (11), ebreak (3), and LSU faults 
+                //    (e.g., Load access fault) successfully decode and reach the Execute (EX) stage where they 
+                //    trigger the trap. 
+                // 
+                //    Note the paradox: The RTL file cv32e40p_id_stage.sv states "Illegal/ebreak/ecall are never 
+                //    counted as retired instructions." This refers to the hardware `minstret` performance counter! 
+                //    Neither the RTL's `minstret` nor Spike's `minstret` increments for these instructions.
+                //    HOWEVER, the behavioral testbench tracer (cv32e40p_tracer.sv) monitors the EX/WB stages. 
+                //    Because ecall and ebreak reach the EX stage, the tracer *does* log them and emits a 
+                //    testbench `riscv_retire` event. Because illegal instructions are squashed in ID, the tracer 
+                //    never sees them and emits no event.
+                // 
+                // The check `cause >= 3` relies on the RISC-V Privileged Specification's numerical exception codes, 
+                // where Fetch/Decode faults are 0, 1, and 2, and all Execute/Memory faults are 3 and above.
+                // If it's an EX-stage exception (cause >= 3), we break to match the tracer's retire event.
+                if (!is_interrupt && cause >= 3) {
+                    break;
+                }
+                
+                pc_before = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
+                spike_core->step(1);
+            }
+            
+            spike_retired_pc = pc_before;
             
             // -----------------------------------------------------------------------
             // IMPERAS REFERENCE: How the default ISS handles riscv-dv completion
