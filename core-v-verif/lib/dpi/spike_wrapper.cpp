@@ -2,9 +2,24 @@
 #include <vector>
 #include <string>
 #include <iomanip>
+#include <cstdarg>
 
 // Xcelium DPI-C standard header
 #include "svdpi.h"
+#include "vpi_user.h"
+
+// Helper to log messages through VPI to EDA simulator log files and flush stdout immediately
+inline void dpi_print(const char* format, ...) {
+    char buffer[2048];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    vpi_printf((PLI_BYTE8*)"%s", buffer);
+    fflush(stdout);
+}
+
 
 // Spike Simulator Headers 
 #include "riscv/debug_module.h"
@@ -15,15 +30,140 @@
 #include "riscv/Params.h"
 #include "riscv/csrs.h"
 
+
+// Debug Control and Status (``dcsr``)
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// CSR Address: 0x7B0
+
+// Reset Value: 0x4000_0003
+
+// .. note::
+
+//    The **ebreaks**, **ebreaku** and **prv** bitfields of this CSR are marked as R/W in Debug Specification 0.13.2. However,
+//    as CV32E40P only supports machine mode, these bitfields are implemented as WARL bitfields (corresponding to how these bitfields will
+//    be specified in the forthcoming Debug Specification 0.14.0).
+
+// Detailed:
+
+// .. table::
+//   :widths: 15 15 70
+//   :class: no-scrollbar-table
+
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | **Bit #** | **Mode**  | **Description**                                                                                 |
+//   +===========+===========+=================================================================================================+
+//   | 31:28     | RO (0x4)  | **xdebugver:** returns 4 - External debug support exists as it is described in this document.   |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 27:16     | RO (0x0)  | Reserved                                                                                        |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 15        | RW        | **ebreakm**                                                                                     |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 14        | RO (0x0)  | Reserved                                                                                        |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 13        | RO (0x0)  | **ebreaks**. Always 0.                                                                          |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 12        | RO (0x0)  | **ebreaku**. Always 0.                                                                          |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 11        | RW        | **stepie**                                                                                      |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 10        | RO (0x0)  | **stopcount**. Always 0.                                                                        |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 9         | RO (0x0)  | **stoptime**. Always 0.                                                                         |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 8:6       | RO        | **cause**                                                                                       |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 5         | RO (0x0)  | Reserved                                                                                        |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 4         | RO (0x0)  | **mprven**. Always 0.                                                                           |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 3         | RO (0x0)  | **nmip**. Always 0.                                                                             |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 2         | RW        | **step**                                                                                        |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+//   | 1:0       | RO (0x3)  | **prv:** returns the current priviledge mode                                                    |
+//   +-----------+-----------+-------------------------------------------------------------------------------------------------+
+
+extern bool cv32_has_u;
+
 class cv32e40p_dcsr_t : public dcsr_csr_t {
 public:
     cv32e40p_dcsr_t(processor_t* const proc, const reg_t addr) : dcsr_csr_t(proc, addr) {}
     bool unlogged_write(const reg_t val) noexcept override {
         reg_t current = read();
-        // Writable bits in CV32E40P: ebreakm(15), ebreaku(12), stepie(11), step(2), prv(1:0)
-        reg_t mask = 0x9807; 
-        reg_t new_val = (current & ~mask) | (val & mask);
+        reg_t new_val = val;
+        
+        // ebreaks (13) is hardwired to 0 (WARL)
+        new_val &= ~(1ULL << 13);
+        
+        if (!cv32_has_u) {
+            // ebreaku (12) is hardwired to 0 (WARL)
+            new_val &= ~(1ULL << 12);
+            // prv (1:0) is hardwired to 3 (Machine Mode) (WARL)
+            new_val = (new_val & ~3ULL) | 3ULL;
+        } else {
+            // prv can only be 0 (U) or 3 (M)
+            reg_t prv_val = val & 3ULL;
+            if (prv_val != 0 && prv_val != 3) {
+                // If invalid, fallback to M mode
+                new_val = (new_val & ~3ULL) | 3ULL;
+            }
+        }
+        
+        dpi_print("[SPIKE DCSR MODIFICATION] PC: 0x%08lx | Before: 0x%08lx | After: 0x%08lx\n", proc->get_state()->pc, current, new_val);
+        dpi_print("  xdebugver [31:28] = 0x%lx\n", (new_val >> 28) & 0xF);
+        dpi_print("  ebreakm   [15]    = %lu\n", (new_val >> 15) & 1);
+        dpi_print("  ebreakh   [14]    = %lu\n", (new_val >> 14) & 1);
+        dpi_print("  ebreaks   [13]    = %lu\n", (new_val >> 13) & 1);
+        dpi_print("  ebreaku   [12]    = %lu\n", (new_val >> 12) & 1);
+        dpi_print("  stepie    [11]    = %lu\n", (new_val >> 11) & 1);
+        dpi_print("  stopcount [10]    = %lu\n", (new_val >> 10) & 1);
+        dpi_print("  stoptime  [9]     = %lu\n", (new_val >> 9) & 1);
+        dpi_print("  cause     [8:6]   = %lu\n", (new_val >> 6) & 7);
+        dpi_print("  mprven    [4]     = %lu\n", (new_val >> 4) & 1);
+        dpi_print("  nmip      [3]     = %lu\n", (new_val >> 3) & 1);
+        dpi_print("  step      [2]     = %lu\n", (new_val >> 2) & 1);
+        dpi_print("  prv       [1:0]   = %lu\n", new_val & 3);
+
         return dcsr_csr_t::unlogged_write(new_val);
+    }
+    
+    reg_t read() const noexcept override {
+        reg_t val = dcsr_csr_t::read();
+        
+        // Enforce xdebugver (31:28) = 4
+        val = (val & 0x0FFFFFFF) | (4ULL << 28);
+        
+        // ebreaks (13) = 0
+        val &= ~(1ULL << 13);
+        
+        if (!cv32_has_u) {
+            // ebreaku (12) = 0
+            val &= ~(1ULL << 12);
+            // prv (1:0) = 3
+            val = (val & ~3ULL) | 3ULL;
+        } else {
+            reg_t prv_val = val & 3ULL;
+            if (prv_val != 0 && prv_val != 3) {
+                val = (val & ~3ULL) | 3ULL;
+            }
+        }
+        
+        // mprven (4), nmip (3), stopcount (10), stoptime (9) are always 0
+        val &= ~((1ULL << 4) | (1ULL << 3) | (1ULL << 10) | (1ULL << 9));
+        
+        return val;
+    }
+};
+
+class cv32e40p_tdata1_t : public tdata1_csr_t {
+public:
+    cv32e40p_tdata1_t(processor_t* const proc, const reg_t addr) : tdata1_csr_t(proc, addr) {}
+    bool unlogged_write(const reg_t val) noexcept override {
+        // CV32E40P tdata1 WARL: Only bit 2 (execute) is RW.
+        // All other bits are fixed (type=2, dmode=1, action=1, m=1, reset: 0x28001040).
+        reg_t forced_val = (val & 0x4ULL) | 0x28001040ULL;
+        return tdata1_csr_t::unlogged_write(forced_val);
     }
 };
 
@@ -113,12 +253,11 @@ public:
             new_val |= 0x00001800;
         }
         
-        // Debug logging (commented out for production):
-        // std::cout << "[DPI-C] mstatus proxy read: has_u=" << cv32_has_u 
-        //           << ", has_f=" << cv32_has_f 
-        //           << ", val=0x" << std::hex << val 
-        //           << ", mask=0x" << mask 
         //           << ", new_val=0x" << new_val << std::dec << std::endl;
+        
+        if (proc_ptr->get_state()->pc >= 0x1a110000 && proc_ptr->get_state()->pc < 0x1a111000) {
+             dpi_print("[SPIKE DEBUG mstatus proxy read] PC: 0x%08lx | val: 0x%08lx | new_val: 0x%08lx\n", proc_ptr->get_state()->pc, val, new_val);
+        }
                   
         return new_val;
     }
@@ -155,6 +294,10 @@ protected:
         //           << ", mask=0x" << mask 
         //           << ", new_val=0x" << new_val << std::dec << std::endl;
         
+        if (proc_ptr->get_state()->pc >= 0x1a110000 && proc_ptr->get_state()->pc < 0x1a111000) {
+             dpi_print("[SPIKE DEBUG mstatus proxy write] PC: 0x%08lx | current: 0x%08lx | val: 0x%08lx | new_val: 0x%08lx\n", proc_ptr->get_state()->pc, current, val, new_val);
+        }
+
         return proxy_csr_t::unlogged_write(new_val);
     }
 };
@@ -168,7 +311,6 @@ public:
 };
 #include <fstream>
 #include <sstream>
-#include "vpi_user.h"
 
 // Global pointers to hold the Spike simulation instance and configuration
 sim_t* spike_sim = nullptr;
@@ -177,13 +319,34 @@ cfg_t* spike_cfg = nullptr;
 uint32_t spike_retired_pc = 0;
 uint32_t write_tohost_addr = 0;
 
+// Dynamic debug addresses passed from the SV testbench
+uint32_t dm_halt_addr_global = 0;
+uint32_t dm_exception_addr_global = 0;
+
+// Helper class to bypass protected unlogged_write method in csr_t
+class csr_t_public : public csr_t {
+public:
+    using csr_t::unlogged_write;
+    csr_t_public(processor_t* const proc, const reg_t addr) : csr_t(proc, addr) {}
+};
+
 extern "C" {
 
     // -------------------------------------------------------------------------
     // 1. Initialization
     // -------------------------------------------------------------------------
-    void rvviRefInit(const char* isa, const char* elf_file, const char* nm_file) {
-        std::cout << "[DPI-C] Initializing Spike Reference Model..." << std::endl;
+    void rvviRefInit(const char* isa, const char* elf_file, const char* nm_file,
+                     const svBitVecVal* boot_addr_ptr, const svBitVecVal* dm_halt_addr_ptr, const svBitVecVal* dm_exception_addr_ptr) {
+        uint32_t boot_addr = *boot_addr_ptr;
+        uint32_t dm_halt_addr = *dm_halt_addr_ptr;
+        uint32_t dm_exception_addr = *dm_exception_addr_ptr;
+        
+        dpi_print("[DPI-C] Initializing Spike Reference Model...\n");
+        dpi_print("[DPI-C]   boot_addr=0x%x dm_halt_addr=0x%x dm_exception_addr=0x%x\n", boot_addr, dm_halt_addr, dm_exception_addr);
+
+        // Store addresses globally for use in rvviRefEventStep
+        dm_halt_addr_global = dm_halt_addr;
+        dm_exception_addr_global = dm_exception_addr;
         
         // Parse nm_file to find write_tohost if provided
         if (nm_file && nm_file[0] != '\0') {
@@ -196,7 +359,7 @@ extern "C" {
                 if (iss >> addr_str >> type_str >> sym_name) {
                     if (sym_name == "write_tohost") {
                         write_tohost_addr = std::stoul(addr_str, nullptr, 16);
-                        std::cout << "[DPI-C] Found write_tohost at 0x" << std::hex << write_tohost_addr << std::endl;
+                        dpi_print("[DPI-C] Found write_tohost at 0x%x\n", write_tohost_addr);
                     }
                 }
             }
@@ -215,7 +378,7 @@ extern "C" {
                     if (iss >> addr_str >> type_str >> sym_name) {
                         if (sym_name == "write_tohost") {
                             write_tohost_addr = std::stoul(addr_str, nullptr, 16);
-                            std::cout << "[DPI-C] Found write_tohost (via riscv32-corev-elf-nm) at 0x" << std::hex << write_tohost_addr << std::endl;
+                            dpi_print("[DPI-C] Found write_tohost (via riscv32-corev-elf-nm) at 0x%x\n", write_tohost_addr);
                             break;
                         }
                     }
@@ -241,7 +404,10 @@ extern "C" {
         // Configure Spike memory: cover up to 0x21000000 to include test_ret_val at 0x20000000
         std::vector<mem_cfg_t> mem_layout;
         mem_layout.push_back(mem_cfg_t(0x00000000, 0x21000000));
-        mem_layout.push_back(mem_cfg_t(0x1A111000, 0x10000));
+        // Map debug ROM region starting at dm_halt_addr to cover both .debugger and .debugger_exception sections
+        // Note: Spike's mem_cfg_t requires the base address to be page aligned (4KB).
+        reg_t aligned_dm_halt = dm_halt_addr & ~0xFFFULL;
+        mem_layout.push_back(mem_cfg_t(aligned_dm_halt, 0x11000));
         std::vector<size_t> hartids = {0}; // 1 hart with ID 0
         spike_cfg = new cfg_t(
             std::make_pair((reg_t)0, (reg_t)0), // default_initrd_bounds
@@ -249,13 +415,13 @@ extern "C" {
             target_isa.c_str(),                 // default_isa
             "M",                                // default_priv
             "vlen:128,elen:64",                 // default_varch
-            false,                              // default_misaligned
+            true,                               // default_misaligned
             endianness_little,                  // default_endianness
             16,                                 // default_pmpregions
             mem_layout,                         // default_mem_layout
             hartids,                            // default_hartids
             false,                              // default_real_time_clint
-            4                                   // default_trigger_count
+            1                                   // default_trigger_count
         );
         
         // Pass the compiled ELF file to Spike so it loads the identical memory image
@@ -263,20 +429,33 @@ extern "C" {
         if (elf_file) {
             args.push_back(elf_file);
         } else {
-            std::cerr << "[DPI-C] Error: No ELF file provided for Spike initialization." << std::endl;
+            dpi_print("[DPI-C] Error: No ELF file provided for Spike initialization.\n");
         }
         
         // Setup modern Spike sim_t arguments
         std::vector<std::pair<reg_t, mem_t*>> mems;
         mems.push_back(std::make_pair(0x00000000, new mem_t(0x20000000)));
         mems.push_back(std::make_pair(0x20000000, new mem_t(0x01000000)));
-        // Spike's bus_t resolves accesses using upper_bound(). It routes accesses after 
-        // 0x1A110000 to the 4KB debug_module, inadvertently hiding the RAM mapped at 0x0.
-        // We explicitly map the 0x1A111000 region so bus_t properly resolves the .debugger_exception section.
-        mems.push_back(std::make_pair(0x1A111000, new mem_t(0x10000)));
+        // Spike's bus_t resolves accesses using upper_bound(). It routes accesses after
+        // 0x1A110000 to the 4KB debug_module. If we map RAM at 0x1A110000, Spike's debug
+        // module will overwrite it in the device map during sim_t instantiation.
+        // By explicitly mapping RAM exactly at dm_halt_addr (e.g. 0x1A110800), we inject
+        // a new key into the bus map that perfectly shadows the debug module for the
+        // .debugger section (custom Debug ROM from the test ELF) and .debugger_exception.
+        mems.push_back(std::make_pair(dm_halt_addr, new mem_t(0x11000)));
         std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
-        debug_module_config_t dmc; 
+        debug_module_config_t dmc;
         openhw::Params params;
+
+        // Configure the debug exception handler address to match the RTL's dm_exception_addr_i pin.
+        // Without this, Spike defaults to 0x1A140000, causing a PC mismatch when an exception
+        // occurs inside the Debug ROM (e.g., Test 11's illegal CSR read).
+        params.set_uint64_t("/top/core/0/", "debug_exception_handler_addr",
+                           (uint64_t)dm_exception_addr);
+
+        // CV32E40P's Load-Store Unit natively supports misaligned accesses without throwing exceptions.
+        // OpenHW's Processor class overrides the cfg_t default_misaligned value with its own params.
+        params.set_bool("/top/core/0/", "misaligned", true);
         
         // Instantiate the simulator with the 12-argument constructor
         spike_sim = new sim_t(
@@ -360,22 +539,96 @@ extern "C" {
         spike_core->get_state()->csrmap[0xCD1] = std::make_shared<const_csr_t>(spike_core, 0xCD1, 3); // privlv (M-mode)
         spike_core->get_state()->csrmap[0xCD2] = std::make_shared<const_csr_t>(spike_core, 0xCD2, 0); // zfinx
         
-        // CV32E40P default boot_addr_i is 0x80
-        spike_core->get_state()->pc = 0x80;
+        // CV32E40P Trigger CSR: tdata1 (0x7a1) proxy & reset value
+        // Spike defaults to mcontrol6 (type 15) → 0xF0000000. CV32E40P implements mcontrol
+        // (type 2) with reset value 0x28001040 (dmode=1) and only bit 2 (execute) is RW.
+        auto tdata1_csr = std::make_shared<cv32e40p_tdata1_t>(spike_core, 0x7a1);
+        spike_core->get_state()->csrmap[0x7a1] = tdata1_csr;
+        bool orig_debug_mode = spike_core->get_state()->debug_mode;
+        spike_core->get_state()->debug_mode = true;
+        tdata1_csr->unlogged_write(0x28001040);
+        spike_core->get_state()->debug_mode = orig_debug_mode;
+
+        // CV32E40P Trigger Info (tinfo, 0x7a4): Reset/constant value = 0x0000_0004
+        // Spike's trigger module dynamically computes tinfo based on all supported trigger types,
+        // returning 0x807c (types 2,3,4,5,6,15 etc.). CV32E40P only implements type 2 (mcontrol),
+        // so tinfo must always read 0x4 (bit 2 set = type 2 supported only).
+        spike_core->get_state()->csrmap[0x7a4] = std::make_shared<const_csr_t>(spike_core, 0x7a4, 0x4);
+
+        // CV32E40P implements mscontext (CSR 0x7aa) as a read-only-zero register.
+        // Spike does not natively instantiate this CSR, so any access to it throws an
+        // illegal instruction exception, immediately breaking lockstep.
+        spike_core->get_state()->csrmap[0x7aa] = std::make_shared<const_csr_t>(spike_core, 0x7aa, 0);
+
+        // Set initial PC from the testbench's boot_addr_i
+        spike_core->get_state()->pc = boot_addr;
         
-        std::cout << "[DPI-C] Spike initialized successfully with ELF: " 
-                  << (elf_file ? elf_file : "NONE") << std::endl;
+        dpi_print("[DPI-C] Spike initialized successfully with ELF: %s\n", (elf_file ? elf_file : "NONE"));
     }
 
     // -------------------------------------------------------------------------
     // 2. Execution
     // -------------------------------------------------------------------------
-    void rvviRefEventStep() {
+    void rvviRefEventStep(const svBitVecVal* rtl_pc_ptr) {
+        uint32_t rtl_pc = *rtl_pc_ptr;
+        
         if (spike_core) {
+            // ---------------------------------------------------------------
+            // Debug Halt Injection via RTL PC Inference
+            // ---------------------------------------------------------------
+            // If the RTL is retiring the Debug ROM entry instruction (dm_halt_addr),
+            // but Spike is not yet in debug mode, it means the RTL just took an
+            // asynchronous debug halt. We set halt_request so Spike takes the debug
+            // trap on its next step, perfectly mirroring the RTL's execution.
+            // pending_step_exception is true when Spike has a step exception pending
+            // (either STEP_STEPPING or STEP_STEPPED) and the RTL is already at the
+            // debug ROM entry. In both states we must NOT inject a halt_request,
+            // as the step exception will fire naturally without external stimulation.
+            bool step_state_stepping = (spike_core->get_state()->single_step == spike_core->get_state()->STEP_STEPPING);
+            bool step_state_stepped  = (spike_core->get_state()->single_step == spike_core->get_state()->STEP_STEPPED);
+            bool pending_step_exception = step_state_stepping || step_state_stepped;
+            //printf("[SPIKE WRAPPER] RTL PC: 0x%08x | single_step: %d | debug_mode: %d | pending_step=%d\n", rtl_pc, spike_core->get_state()->single_step, spike_core->get_state()->debug_mode, (int)pending_step_exception);
+            if (rtl_pc == dm_halt_addr_global && !spike_core->get_state()->debug_mode && !pending_step_exception) {
+                spike_core->halt_request = processor_t::HR_REGULAR;
+            }
+
             uint64_t minstret_before = spike_core->get_state()->minstret->read();
             uint32_t pc_before = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
             
+            // If we are injecting a debug trap this cycle, or if RTL jumped straight to the 
+            // Debug ROM entry due to an exception during a single-step (pending_step_exception),
+            // Spike will ultimately execute the Debug ROM entry in this cycle.
+            if (spike_core->halt_request == processor_t::HR_REGULAR ||
+                (rtl_pc == dm_halt_addr_global && pending_step_exception && !spike_core->get_state()->debug_mode)) {
+                pc_before = dm_halt_addr_global;
+            }
+            
+            // CV32E40P specifically treats mret inside debug mode as a debug exception.
+            // Standard Spike executes it normally. We intercept it here, skip step(1) entirely
+            // to prevent CSR modifications, and manually force the PC to dm_exception_addr_global.
+            uint32_t insn_to_exec = 0;
+            try {
+                insn_to_exec = spike_core->get_mmu()->load_insn(pc_before).insn.bits();
+            } catch (...) {}
+            const uint32_t OPCODE_MRET = 0x30200073;
+
+            if (spike_core->get_state()->debug_mode && insn_to_exec == OPCODE_MRET) {
+                spike_core->get_state()->pc = dm_exception_addr_global;
+                spike_retired_pc = pc_before;
+                return;
+            }
+
+            if (pc_before == 0x5da || pc_before == 0x5d6) {
+                uint32_t mip_val = spike_core->get_csr(0x344);
+                uint32_t mie_val = spike_core->get_csr(0x304);
+                uint32_t mstatus_val = spike_core->get_csr(0x300);
+                dpi_print("[SPIKE DEBUG] PC: 0x%08x | mip: 0x%08x | mie: 0x%08x | mstatus: 0x%08x\n", pc_before, mip_val, mie_val, mstatus_val);
+            }
+
             spike_core->step(1);
+            
+            // Clear halt_request after it has been consumed by step()
+            spike_core->halt_request = processor_t::HR_NONE;
             
             // If Spike took a trap (synchronous exception or asynchronous interrupt)
             // during the step, it did not successfully retire an instruction.
@@ -408,12 +661,49 @@ extern "C" {
                 //    HOWEVER, the behavioral testbench tracer (cv32e40p_tracer.sv) monitors the EX/WB stages. 
                 //    Because ecall and ebreak reach the EX stage, the tracer *does* log them and emits a 
                 //    testbench `riscv_retire` event. Because illegal instructions are squashed in ID, the tracer 
-                //    never sees them and emits no event.
-                // 
-                // The check `cause >= 3` relies on the RISC-V Privileged Specification's numerical exception codes, 
-                // where Fetch/Decode faults are 0, 1, and 2, and all Execute/Memory faults are 3 and above.
-                // If it's an EX-stage exception (cause >= 3), we break to match the tracer's retire event.
-                if (!is_interrupt && cause >= 3) {
+                
+                // IMPORTANT: We must NOT break on stale mcause when Spike just entered debug mode.
+                // Debug entry does not update mcause (it sets dcsr.cause instead), so mcause may
+                // contain a stale value >= 3 from a previous exception. Breaking here would prevent
+                // Spike from executing the first instruction of the debug handler.
+                
+                mcause = spike_core->get_state()->mcause->read();
+                is_interrupt = (mcause & 0x80000000) != 0;
+                
+                // Debug mode traps (e.g. ebreak) update dcsr.cause, not mcause.
+                // If we are in debug mode, mcause is stale and may incorrectly have the interrupt bit set.
+                if (spike_core->get_state()->debug_mode) {
+                    is_interrupt = false;
+                }
+                
+                cause = mcause & 0x7FFFFFFF;
+                bool is_ex_exception = !is_interrupt && cause >= 3;
+                
+                // However, if the instruction was an ebreak or ecall, the RTL tracer ALWAYS logs it,
+                // even if we are already in debug mode. So we must explicitly peek at the instruction
+                // to see if we should break and report it.
+                uint32_t insn = 0;
+                try {
+                    // load_insn() fetches the actual instruction machine-code binary from memory
+                    insn = spike_core->get_mmu()->load_insn(pc_before).insn.bits();
+                } catch (...) {
+                    // Ignore memory faults during inspection
+                }
+                
+                // These are NOT memory addresses. They are the architectural RISC-V machine-code
+                // binary representations (opcodes) for the ebreak, c.ebreak, and ecall instructions.
+                const uint32_t OPCODE_EBREAK   = 0x00100073;
+                const uint32_t OPCODE_C_EBREAK = 0x9002;
+                const uint32_t OPCODE_ECALL    = 0x00000073;
+
+                bool is_ebreak = (insn == OPCODE_EBREAK) || ((insn & 0xFFFF) == OPCODE_C_EBREAK);
+                bool is_ecall  = (insn == OPCODE_ECALL);
+                if (pc_before == 0x00012f72) {
+                    dpi_print("[SPIKE DEBUG] pc_before=0x%08x, insn=0x%08x, is_ebreak=%d, is_ex_exception=%d, is_interrupt=%d, debug_mode=%d, mcause=0x%lx\n", 
+                           pc_before, insn, is_ebreak, is_ex_exception, is_interrupt, spike_core->get_state()->debug_mode, spike_core->get_state()->mcause->read());
+                }
+                if ((is_ex_exception && !spike_core->get_state()->debug_mode) || 
+                    (!is_interrupt && (is_ebreak || is_ecall))) {
                     break;
                 }
                 
@@ -422,31 +712,6 @@ extern "C" {
             }
             
             spike_retired_pc = pc_before;
-            
-            // -----------------------------------------------------------------------
-            // IMPERAS REFERENCE: How the default ISS handles riscv-dv completion
-            // -----------------------------------------------------------------------
-            // In Imperas OVPsim, there is a vendor_lib/imperas/design/monitor.sv module
-            // that intercepts instruction fetches at the `write_tohost` address:
-            //
-            //     nm_get("write_tohost", _test_exit);
-            //     ...
-            //     if (_test_exit.enable && bus.IAddr==_test_exit.addr) begin
-            //         if (!io.Shutdown) $display("Fetch: Exit Label");
-            //         io.Shutdown = 1;
-            //     end
-            //
-            // When io.Shutdown=1, Imperas forcefully terminates the test. 
-            // However, core-v-verif riscv-dv BSP tests actually end in an exception handler
-            // that executes WFI with MIE=0 to halt the core. Spike can natively detect this
-            // via is_waiting_for_interrupt().
-            // -----------------------------------------------------------------------
-            
-            // if (pc_before != 0x0 && pc_after == 0x0) {
-            //     std::cerr << "[DPI-C] Spike PC jumped to 0x0! pc_before=0x" << std::hex << pc_before << std::endl;
-            //     std::cerr << "[DPI-C] mcause = 0x" << std::hex << spike_core->get_state()->mcause->read() << std::endl;
-            //     std::cerr << "[DPI-C] mtval = 0x" << std::hex << spike_core->get_state()->mtval->read() << std::endl;
-            // }
         }
     }
 
@@ -471,8 +736,7 @@ extern "C" {
         uint32_t rtl_val   = rtl_reg_val[0];
         
         if (spike_val != rtl_val) {
-             std::cerr << "[DPI-C] GPR[" << std::dec << reg_index << "] Mismatch! Spike: 0x" 
-                       << std::hex << spike_val << " RTL: 0x" << rtl_val << std::endl;
+             dpi_print("[DPI-C] GPR[%d] Mismatch! Spike: 0x%x RTL: 0x%x\n", reg_index, spike_val, rtl_val);
              return 1;
         }
         return 0;
@@ -481,16 +745,19 @@ extern "C" {
     // Explicitly notify Spike when the RTL takes a trap
     void rvviRefInjectTrap(int cause, int epc, int tval) {
         if (!spike_core) return;
-        std::cout << "[DPI-C] Spike injecting trap: cause=0x" << std::hex << cause 
-                  << " epc=0x" << epc << " tval=0x" << tval << std::endl;
+        dpi_print("[DPI-C] Spike injecting trap: cause=0x%x epc=0x%x tval=0x%x\n", cause, epc, tval);
                   
         class processor_t_public : public processor_t {
         public:
             using processor_t::take_trap;
         };
         
-        custom_trap_t t(cause, tval);
-        static_cast<processor_t_public*>(spike_core)->take_trap(t, epc);
+        // Only inject M-mode traps. Debug mode traps (enter/exit) are handled
+        // by halt_request injection in rvviRefEventStep, not here.
+        if (!spike_core->get_state()->debug_mode) {
+            custom_trap_t t(cause, tval);
+            static_cast<processor_t_public*>(spike_core)->take_trap(t, epc);
+        }
     }
 
     // Compare Control and Status Registers (CSRs)
@@ -502,8 +769,7 @@ extern "C" {
         uint32_t rtl_val       = rtl_csr_val[0];
 
         if (spike_csr_val != rtl_val) {
-            std::cerr << "[DPI-C] CSR[0x" << std::hex << csr_address << "] Mismatch! Spike: 0x" 
-                      << spike_csr_val << " RTL: 0x" << rtl_val << std::endl;
+            dpi_print("[DPI-C] CSR[0x%x] Mismatch! Spike: 0x%x RTL: 0x%x\n", csr_address, spike_csr_val, rtl_val);
             return 1;
         }
         return 0;
@@ -522,10 +788,56 @@ extern "C" {
     }
 
     // -------------------------------------------------------------------------
-    // 4. Teardown
+    // 4. Synchronize Asynchronous Interrupts (MIP)
+    // -------------------------------------------------------------------------
+    // The CV32E40P RTL tracer does not emit riscv_retire events for interrupts,
+    // so Spike needs to know when an interrupt pin (MIP) changes to evaluate it
+    // synchronously on the next step.
+    void rvviRefSyncIrq(const svBitVecVal* mip_val_ptr) {
+        if (!spike_core) return;
+        uint32_t mip_val = *mip_val_ptr;
+        if (spike_core->get_state()->csrmap.count(0x344)) {
+            // Write to mip directly using backdoor_write_with_mask, which bypasses
+            // the write_mask (since CV32E40P's mip is read-only from software).
+            static_cast<mip_csr_t*>(spike_core->get_state()->csrmap[0x344].get())
+                ->backdoor_write_with_mask(0xFFFFFFFF, mip_val);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Performance Counter Synchronization (mcycle/minstret ghosting)
+    // -------------------------------------------------------------------------
+    // Per the DV methodology paper "The evolution of RISC-V processor verification":
+    //   "A second problem when using an ISS as a reference model is the timing of
+    //    'side effects'. An instruction is said to have side effects if it updates
+    //    one or more state variables which are not explicitly part of the instruction.
+    //    For example, the CSR minstret is updated each time an instruction is retired."
+    //
+    // Because Spike is instruction-accurate and does not model cycle-accurate pipeline
+    // stalls or memory latencies, it is impossible for it to independently compute the
+    // RTL's exact mcycle value. We synchronize these specific CSRs from the RTL to
+    // Spike before each step, so that any csrr mcycle/minstret reads the correct value.
+    void rvviRefSyncPerfCounters(const svBitVecVal* mcycle_val_ptr, const svBitVecVal* minstret_val_ptr) {
+        if (!spike_core) return;
+        
+        uint32_t mcycle_val = *mcycle_val_ptr;
+        uint32_t minstret_val = *minstret_val_ptr;
+        
+        // Sync mcycle (CSR 0xB00) - lower 32 bits
+        if (spike_core->get_state()->csrmap.count(0xB00)) {
+            static_cast<csr_t_public*>(spike_core->get_state()->csrmap[0xB00].get())->unlogged_write(mcycle_val);
+        }
+        // Sync minstret (CSR 0xB02) - lower 32 bits
+        if (spike_core->get_state()->csrmap.count(0xB02)) {
+            static_cast<csr_t_public*>(spike_core->get_state()->csrmap[0xB02].get())->unlogged_write(minstret_val);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Teardown
     // -------------------------------------------------------------------------
     void rvviRefShutdown() {
-        std::cout << "[DPI-C] Shutting down Spike Reference Model..." << std::endl;
+        dpi_print("[DPI-C] Shutting down Spike Reference Model...\n");
         if (spike_sim) {
             delete spike_sim;
             spike_sim = nullptr;

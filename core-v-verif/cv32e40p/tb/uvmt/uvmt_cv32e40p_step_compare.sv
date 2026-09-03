@@ -74,8 +74,18 @@ module uvmt_cv32e40p_step_compare
 );
 
 `ifdef ISS_SPIKE
-import "DPI-C" context function void rvviRefInit(string isa, string elf_file, string nm_file);
-import "DPI-C" context function void rvviRefEventStep();
+import "DPI-C" context function void rvviRefInit(
+    string isa, string elf_file, string nm_file,
+    input bit [31:0] boot_addr,
+    input bit [31:0] dm_halt_addr,
+    input bit [31:0] dm_exception_addr
+);
+import "DPI-C" context function void rvviRefEventStep(input bit [31:0] rtl_pc);
+import "DPI-C" context function void rvviRefSyncPerfCounters(
+    input bit [31:0] mcycle_val,
+    input bit [31:0] minstret_val
+);
+import "DPI-C" context function void rvviRefSyncIrq(input bit [31:0] mip_val);
 import "DPI-C" context function int rvviRefPcCompare(input bit [31:0] rtl_pc);
 import "DPI-C" context function int rvviRefGprsCompare(input int reg_index, input bit [31:0] rtl_reg_val);
 import "DPI-C" context function int rvviRefCsrCompare(input int csr_address, input bit [31:0] rtl_csr_val);
@@ -128,13 +138,27 @@ import "DPI-C" context function void rvviRefShutdown();
   initial begin
     wait (clknrst_if.reset_n === 1'b0);
     wait (clknrst_if.reset_n === 1'b1);
+    // Wait one clock edge after reset so that all initial blocks (in particular
+    // tb_ifs.sv quasi_static_controls) have completed their time-0 signal
+    // assignments (boot_addr, dm_halt_addr, dm_exception_addr) before we sample
+    // them. Without this, a race condition results in reading garbage/uninitialized
+    // values for these signals.
+    @(posedge clknrst_if.clk);
     if ($value$plusargs("elf_file=%s", elf_file)) begin
       `uvm_info("Step-and-Compare", $sformatf("Initializing Spike with ELF: %s", elf_file), UVM_NONE)
       if ($value$plusargs("nm_file=%s", nm_file)) begin
-        rvviRefInit("RV32IMC", elf_file, nm_file);
+        rvviRefInit("RV32IMC", elf_file, nm_file,
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.boot_addr,
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_halt_addr,
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_exception_addr
+        );
       end else begin
         `uvm_info("Step-and-Compare", "No +nm_file specified, passing empty string", UVM_NONE)
-        rvviRefInit("RV32IMC", elf_file, "");
+        rvviRefInit("RV32IMC", elf_file, "",
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.boot_addr,
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_halt_addr,
+            $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_exception_addr
+        );
       end
     end else begin
       `uvm_fatal("Step-and-Compare", "No +elf_file specified for Spike ISS!")
@@ -548,7 +572,27 @@ import "DPI-C" context function void rvviRefShutdown();
       // check expected against actual
       if (use_iss) begin
 `ifdef ISS_SPIKE
-         rvviRefEventStep();
+         rvviRefSyncPerfCounters(
+             `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[0][31:0],
+             `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[2][31:0]
+         );
+         if (step_compare_if.insn_pc == 32'h5da || step_compare_if.insn_pc == 32'h5d6) begin
+             $display("[SV DEBUG] PC: 0x%08x | irq_mip: 0x%08x | RTL mie: 0x%08x | RTL mstatus.MIE: %b", step_compare_if.insn_pc, $root.uvmt_cv32e40p_tb.irq_mip, `CV32E40P_CORE.cs_registers_i.mie_q, `CV32E40P_CORE.cs_registers_i.mstatus_q.mie);
+         end
+         rvviRefEventStep(step_compare_if.insn_pc);
+         
+         // On Imperas, we have the following logic that controls interrupt delivery:
+         // iss_wrap.io.irq_i = iss_wrap.io.deferint ? dut_wrap.irq :
+         //                     !deferint_ack ? irq_deferint_ack :
+         //                     irq_deferint_sleep;
+         //
+         // We mimic this exact behavior for Spike. step_compare_if.deferint_prime drops
+         // to 0 exactly when the RTL ID stage commits to an interrupt.
+         // By conditionally passing irq_mip only when deferint_prime == 0, we prevent Spike
+         // from evaluating and taking interrupts prematurely (e.g., during the 1-instruction
+         // interrupt shadow following an `mret` instruction where RTL mstatus.MIE hasn't updated,
+         // such as instruction 0x5da).
+         rvviRefSyncIrq((step_compare_if.deferint_prime == 1'b0) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0);
 `endif
          compare();
       end
