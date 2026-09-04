@@ -572,6 +572,18 @@ extern "C" {
         // illegal instruction exception, immediately breaking lockstep.
         spike_core->get_state()->csrmap[0x7aa] = std::make_shared<const_csr_t>(spike_core, 0x7aa, 0);
 
+        // CV32E40P implements tdata3 (CSR 0x7a3) as read-only-zero in both M-Mode and
+        // Debug Mode: "CV32E40P does not support the features requiring this register.
+        // Writes are ignored and reads will always return zero." (control_status_registers.rst,
+        // csr-tdata3). Spike's default tdata3_csr_t is a real, storage-backed "textra"
+        // register (mhvalue/mhselect/sbytemask/svalue/sselect) that CV32E40P's trigger module
+        // does not implement (debug.rst lists only tselect/tdata1/tdata2/tinfo as the
+        // "most relevant" implemented trigger registers). module_t::tdata3_write only blocks
+        // writes when tdata1.dmode && !debug_mode, so a write to tdata3 issued while already
+        // in Debug Mode (as this test does, deliberately, to close coverage holes) is let
+        // through and latched into svalue, unlike the RTL's unconditional hardwired-zero.
+        spike_core->get_state()->csrmap[0x7a3] = std::make_shared<const_csr_t>(spike_core, 0x7a3, 0);
+
         // Set initial PC from the testbench's boot_addr_i
         spike_core->get_state()->pc = boot_addr;
         
