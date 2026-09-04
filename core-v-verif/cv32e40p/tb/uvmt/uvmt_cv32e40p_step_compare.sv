@@ -599,6 +599,7 @@ import "DPI-C" context function void rvviRefShutdown();
    always @(step_compare_if.riscv_retire) begin
       bit is_dret;
       bit is_stepie;
+      bit is_stepping;
       bit [31:0] irq_fwd_val;
       // check expected against actual
       if (use_iss) begin
@@ -643,23 +644,39 @@ import "DPI-C" context function void rvviRefShutdown();
                     ($root.uvmt_cv32e40p_tb.dut_wrap.cv32e40p_wrapper_i.tracer_i.insn_val == 32'h7b200073);
 
           // ---------------------------------------------------------------------------------------
-          // 2. IS_STEPIE SIGNAL:
-          // `dcsr.stepie` (bit 11 of Debug Control & Status Register 0x7B0, stored in cs_registers_i.dcsr_q.stepie)
-          // controls whether interrupts are enabled during single stepping.
-          // When stepie == 1, interrupts remain active while stepping and trap as normal upon dret.
+          // 2. IS_STEPIE / IS_STEPPING SIGNALS:
+          // `dcsr.stepie` (bit 11) controls whether interrupts are enabled during single stepping,
+          // per debug.rst "Interrupts during Single-Step Behavior" -- this bit's defined effect is
+          // scoped to when the core is actually mid single-step session (`dcsr.step`, bit 2, == 1).
+          // When stepping and stepie == 1, interrupts remain active while stepping and trap as
+          // normal upon dret. `dcsr.step`/`dcsr.stepie` are both read from cs_registers_i.dcsr_q,
+          // valid at this retirement boundary the same way is_dret's tracer-sourced signal is.
           // ---------------------------------------------------------------------------------------
-          is_stepie = `CV32E40P_CORE.cs_registers_i.dcsr_q.stepie;
+          is_stepie    = `CV32E40P_CORE.cs_registers_i.dcsr_q.stepie;
+          is_stepping  = `CV32E40P_CORE.cs_registers_i.dcsr_q.step;
 
           // ---------------------------------------------------------------------------------------
-          // 3. SINGLE-STEP INTERRUPT SYNCHRONIZATION:
-          // When returning from Debug Mode via dret while single-step interrupts are enabled (is_dret && is_stepie),
-          // the RTL pipeline evaluates pending interrupts immediately upon exiting Debug Mode.
+          // 3. DEBUG-MODE INTERRUPT SYNCHRONIZATION:
+          // Per exceptions_interrupts.rst: "In Debug Mode, all interrupts are ignored independent
+          // of mstatus.MIE and the content of the mie CSR." Masking is solely a function of
+          // debug_mode -- unlike `mret`, `dret` does not restore any CSR in the WB stage, so there
+          // is no pipeline-timing shadow: the RTL evaluates and takes a pending interrupt on the
+          // instruction immediately following dret's retirement, with zero shadow instructions
+          // (confirmed in trace_core_00000000.log: 0x1a110d28 dret is directly followed by 0x78,
+          // the interrupt handler, with no intervening PC -- e.g. Test 19 "irq in debug").
+          // `dcsr.stepie` only has a defined effect while `dcsr.step == 1` (an active single-step
+          // session, e.g. Test 18's step_info=5/6 sub-cases); it must not gate interrupt delivery
+          // after a plain (non-stepping) debug_req_i halt/resume, where it may hold an unrelated
+          // leftover value from a prior test (see debugger.S _debugger_single_step_disable, which
+          // clears both step and stepie at the end of Test 18, ahead of Test 19).
           // Because dret retired inside Debug ROM, deferint_prime remains 1. If we only checked
           // (deferint_prime == 0), Spike's mip would be cleared to 0, causing a PC mismatch.
-          // Therefore, when (is_dret && is_stepie) is true, we forward irq_mip to Spike so Spike
-          // evaluates and takes the pending interrupt on the next step in lockstep with RTL.
+          // Therefore, when is_dret is true and we are either not mid single-step or stepie is
+          // set, we forward irq_mip to Spike so Spike evaluates and takes the pending interrupt on
+          // the next step in lockstep with RTL.
           // ---------------------------------------------------------------------------------------
-          irq_fwd_val = (step_compare_if.deferint_prime == 1'b0 || (is_dret && is_stepie)) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0;
+          irq_fwd_val = (step_compare_if.deferint_prime == 1'b0 ||
+                         (is_dret && (!is_stepping || is_stepie))) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0;
 
           // ---------------------------------------------------------------------------------------
           // DEBUG INSTRUMENTATION: dump every control signal feeding the dret/interrupt gating
