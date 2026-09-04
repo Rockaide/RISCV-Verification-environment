@@ -712,7 +712,7 @@ $(SPIKE_FESVR_LIB).so $(SPIKE_RISCV_LIB).so:
 
 SPIKE_WRAPPER_LIB = $(CORE_V_VERIF)/lib/dpi/libspike_wrapper.so
 
-$(SPIKE_WRAPPER_LIB): $(SPIKE_RISCV_LIB).so
+$(SPIKE_WRAPPER_LIB): $(SPIKE_RISCV_LIB).so $(CORE_V_VERIF)/lib/dpi/spike_wrapper.cpp
 	g++ -shared -fPIC -std=c++17 -I$(SPIKE_INSTALL_DIR)/include -I$(SPIKE_PATH) -I$(SPIKE_PATH)/riscv -I$(DPI_INCLUDE) $(CORE_V_VERIF)/lib/dpi/spike_wrapper.cpp -o $(SPIKE_WRAPPER_LIB) -L$(SPIKE_LIBS_DIR) -Wl,-rpath=$(SPIKE_LIBS_DIR) -lriscv -lfesvr -lyaml-cpp
 
 spike_lib: $(SPIKE_FESVR_LIB).so $(SPIKE_RISCV_LIB).so $(SPIKE_WRAPPER_LIB)

@@ -180,9 +180,9 @@ incr_test_counts
 
 # --> Test: debug_test : Build: uvmt_cv32e40p : 
 # --> Test (Index: 0): make test COREV=YES TEST=debug_test : 
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make test COREV=YES TEST=debug_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make test COREV=YES TEST=debug_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make test COREV=YES TEST=debug_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike >& /dev/null;
+make test COREV=YES TEST=debug_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
