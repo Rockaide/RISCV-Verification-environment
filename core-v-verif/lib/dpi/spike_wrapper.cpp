@@ -110,20 +110,20 @@ public:
             }
         }
         
-        dpi_print("[SPIKE DCSR MODIFICATION] PC: 0x%08lx | Before: 0x%08lx | After: 0x%08lx\n", proc->get_state()->pc, current, new_val);
-        dpi_print("  xdebugver [31:28] = 0x%lx\n", (new_val >> 28) & 0xF);
-        dpi_print("  ebreakm   [15]    = %lu\n", (new_val >> 15) & 1);
-        dpi_print("  ebreakh   [14]    = %lu\n", (new_val >> 14) & 1);
-        dpi_print("  ebreaks   [13]    = %lu\n", (new_val >> 13) & 1);
-        dpi_print("  ebreaku   [12]    = %lu\n", (new_val >> 12) & 1);
-        dpi_print("  stepie    [11]    = %lu\n", (new_val >> 11) & 1);
-        dpi_print("  stopcount [10]    = %lu\n", (new_val >> 10) & 1);
-        dpi_print("  stoptime  [9]     = %lu\n", (new_val >> 9) & 1);
-        dpi_print("  cause     [8:6]   = %lu\n", (new_val >> 6) & 7);
-        dpi_print("  mprven    [4]     = %lu\n", (new_val >> 4) & 1);
-        dpi_print("  nmip      [3]     = %lu\n", (new_val >> 3) & 1);
-        dpi_print("  step      [2]     = %lu\n", (new_val >> 2) & 1);
-        dpi_print("  prv       [1:0]   = %lu\n", new_val & 3);
+        // dpi_print("[SPIKE DCSR MODIFICATION] PC: 0x%08lx | Before: 0x%08lx | After: 0x%08lx\n", proc->get_state()->pc, current, new_val);
+        // dpi_print("  xdebugver [31:28] = 0x%lx\n", (new_val >> 28) & 0xF);
+        // dpi_print("  ebreakm   [15]    = %lu\n", (new_val >> 15) & 1);
+        // dpi_print("  ebreakh   [14]    = %lu\n", (new_val >> 14) & 1);
+        // dpi_print("  ebreaks   [13]    = %lu\n", (new_val >> 13) & 1);
+        // dpi_print("  ebreaku   [12]    = %lu\n", (new_val >> 12) & 1);
+        // dpi_print("  stepie    [11]    = %lu\n", (new_val >> 11) & 1);
+        // dpi_print("  stopcount [10]    = %lu\n", (new_val >> 10) & 1);
+        // dpi_print("  stoptime  [9]     = %lu\n", (new_val >> 9) & 1);
+        // dpi_print("  cause     [8:6]   = %lu\n", (new_val >> 6) & 7);
+        // dpi_print("  mprven    [4]     = %lu\n", (new_val >> 4) & 1);
+        // dpi_print("  nmip      [3]     = %lu\n", (new_val >> 3) & 1);
+        // dpi_print("  step      [2]     = %lu\n", (new_val >> 2) & 1);
+        // dpi_print("  prv       [1:0]   = %lu\n", new_val & 3);
 
         return dcsr_csr_t::unlogged_write(new_val);
     }
@@ -322,6 +322,18 @@ uint32_t write_tohost_addr = 0;
 // Dynamic debug addresses passed from the SV testbench
 uint32_t dm_halt_addr_global = 0;
 uint32_t dm_exception_addr_global = 0;
+
+// DEBUG INSTRUMENTATION: last mip value seen by rvviRefSyncIrq, so we only print on change
+// instead of flooding the log on every retire. Sentinel forces a print on the first call.
+uint32_t dbg_last_irq_mip = 0xFFFFFFFFu;
+
+// DEBUG INSTRUMENTATION: address window covering debug_test's single_step.S
+// (~0x00012f00-0x000130c0) so rvviRefEventStep prints stay scoped to Test 18
+// (Single stepping) instead of dumping all 250k+ retired instructions.
+static inline bool dbg_in_single_step_window(uint32_t pc) {
+    return (pc >= 0x00012f00u && pc <= 0x000130c0u) ||
+           (pc >= dm_halt_addr_global && pc < dm_halt_addr_global + 0x1000u);
+}
 
 // Helper class to bypass protected unlogged_write method in csr_t
 class csr_t_public : public csr_t {
@@ -625,8 +637,29 @@ extern "C" {
                 dpi_print("[SPIKE DEBUG] PC: 0x%08x | mip: 0x%08x | mie: 0x%08x | mstatus: 0x%08x\n", pc_before, mip_val, mie_val, mstatus_val);
             }
 
+            // DEBUG INSTRUMENTATION: full pre-step Spike state around Test 18 (Single stepping),
+            // to cross-check against the [SV DEBUG retire]/[SV DEBUG irq_mip] prints in
+            // uvmt_cv32e40p_step_compare.sv for the same instant.
+            // bool dbg_window_pre = dbg_in_single_step_window(rtl_pc) || dbg_in_single_step_window(pc_before);
+            // if (dbg_window_pre) {
+            //     uint32_t mip_val = spike_core->get_csr(0x344);
+            //     uint32_t mie_val = spike_core->get_csr(0x304);
+            //     uint32_t dcsr_val = spike_core->get_csr(0x7b0);
+            //     dpi_print("[SPIKE DEBUG pre-step] rtl_pc=0x%08x pc_before=0x%08x debug_mode=%d single_step=%d halt_request=%d pending_step_exception=%d mip=0x%08x mie=0x%08x dcsr=0x%08x minstret_before=%lu\n",
+            //               rtl_pc, pc_before, spike_core->get_state()->debug_mode, spike_core->get_state()->single_step,
+            //               (int)spike_core->halt_request, (int)pending_step_exception, mip_val, mie_val, dcsr_val, minstret_before);
+            // }
+
             spike_core->step(1);
-            
+
+            // if (dbg_window_pre) {
+            //     uint32_t pc_after = (uint32_t)(spike_core->get_state()->pc & 0xFFFFFFFF);
+            //     uint64_t minstret_after = spike_core->get_state()->minstret->read();
+            //     dpi_print("[SPIKE DEBUG post-step] pc_after=0x%08x mcause=0x%08lx minstret_after=%lu (retired=%d) debug_mode=%d single_step=%d\n",
+            //               pc_after, spike_core->get_state()->mcause->read(), minstret_after,
+            //               (minstret_after != minstret_before), spike_core->get_state()->debug_mode, spike_core->get_state()->single_step);
+            // }
+
             // Clear halt_request after it has been consumed by step()
             spike_core->halt_request = processor_t::HR_NONE;
             
@@ -638,7 +671,19 @@ extern "C" {
                 uint64_t mcause = spike_core->get_state()->mcause->read();
                 bool is_interrupt = (mcause & 0x80000000) != 0;
                 uint64_t cause = mcause & 0x7FFFFFFF;
-                
+
+                // DEBUG INSTRUMENTATION: every fast-forward loop iteration is Spike executing
+                // one instruction that did NOT retire (a trap handler entry, a stale-mcause
+                // exception, etc.) while chasing the next real retirement. This is exactly where
+                // a premature interrupt (mip forwarded to Spike before the RTL actually commits
+                // to it) would manifest as an unexpected trap here.
+                if (dbg_in_single_step_window(pc_before)) {
+                    uint32_t mip_val = spike_core->get_csr(0x344);
+                    dpi_print("[SPIKE DEBUG loop-iter] pc_before=0x%08x mcause=0x%08lx is_interrupt=%d cause=%lu debug_mode=%d single_step=%d mip=0x%08x\n",
+                              pc_before, mcause, is_interrupt, cause, spike_core->get_state()->debug_mode,
+                              spike_core->get_state()->single_step, mip_val);
+                }
+
                 // Note: The CV32E40P documentation (pipeline.rst and exceptions_interrupts.rst) 
                 // does not explicitly document which pipeline stage detects each exception. 
                 // However, based on RTL inspection (cv32e40p_id_stage.sv) and standard RISC-V design 
@@ -699,8 +744,9 @@ extern "C" {
                 bool is_ebreak = (insn == OPCODE_EBREAK) || ((insn & 0xFFFF) == OPCODE_C_EBREAK);
                 bool is_ecall  = (insn == OPCODE_ECALL);
                 if (pc_before == 0x00012f72) {
-                    dpi_print("[SPIKE DEBUG] pc_before=0x%08x, insn=0x%08x, is_ebreak=%d, is_ex_exception=%d, is_interrupt=%d, debug_mode=%d, mcause=0x%lx\n", 
-                           pc_before, insn, is_ebreak, is_ex_exception, is_interrupt, spike_core->get_state()->debug_mode, spike_core->get_state()->mcause->read());
+                    uint32_t mip_val = spike_core->get_csr(0x344);
+                    dpi_print("[SPIKE DEBUG] pc_before=0x%08x, insn=0x%08x, is_ebreak=%d, is_ex_exception=%d, is_interrupt=%d, debug_mode=%d, mcause=0x%lx, mip=0x%08x\n",
+                           pc_before, insn, is_ebreak, is_ex_exception, is_interrupt, spike_core->get_state()->debug_mode, spike_core->get_state()->mcause->read(), mip_val);
                 }
                 if ((is_ex_exception && !spike_core->get_state()->debug_mode) || 
                     (!is_interrupt && (is_ebreak || is_ecall))) {
@@ -796,6 +842,19 @@ extern "C" {
     void rvviRefSyncIrq(const svBitVecVal* mip_val_ptr) {
         if (!spike_core) return;
         uint32_t mip_val = *mip_val_ptr;
+
+        // DEBUG INSTRUMENTATION: print every time the mip value handed to Spike changes,
+        // together with the Spike-side context at that instant. Cross-reference against
+        // [SV DEBUG retire] (which prints the same fwd_irq value from the SV side) and
+        // [SV DEBUG irq_mip] (which shows whether the RTL-side sticky irq_mip register
+        // itself is latched/stuck) to see exactly what Spike is being told and why.
+        if (mip_val != dbg_last_irq_mip) {
+            dpi_print("[SPIKE DEBUG rvviRefSyncIrq] mip: 0x%08x -> 0x%08x | spike_pc=0x%08lx | debug_mode=%d | single_step=%d | halt_request=%d\n",
+                      dbg_last_irq_mip, mip_val, spike_core->get_state()->pc, spike_core->get_state()->debug_mode,
+                      spike_core->get_state()->single_step, (int)spike_core->halt_request);
+            dbg_last_irq_mip = mip_val;
+        }
+
         if (spike_core->get_state()->csrmap.count(0x344)) {
             // Write to mip directly using backdoor_write_with_mask, which bypasses
             // the write_mask (since CV32E40P's mip is read-only from software).

@@ -178,6 +178,34 @@ import "DPI-C" context function void rvviRefShutdown();
     end
   end
 
+`ifdef ISS_SPIKE
+  // ---------------------------------------------------------------------------------------
+  // DEBUG INSTRUMENTATION: irq_mip sticky-register monitor.
+  //
+  // uvmt_cv32e40p_tb.sv's irq_mip register is only ever cleared via
+  // step_compare_if.ovp_cpu_state_stepi (or, on the Imperas-only branch, when
+  // iss_wrap.io.deferint == 1). ovp_cpu_state_stepi is driven exclusively from
+  // uvmt_cv32e40p_iss_wrap.sv (cpu.control.state_stepi), which is only instantiated
+  // `ifdef ISS_IMPERAS. When running with ISS_SPIKE, iss_wrap does not exist, so
+  // ovp_cpu_state_stepi never toggles -- meaning irq_mip[idx] may latch permanently
+  // once dut_wrap.cv32e40p_wrapper_i.irq_i[idx] pulses high even once, and never clear
+  // for the rest of simulation. This monitor prints every time irq_mip changes value so
+  // we can see directly whether it latches instead of clearing after an interrupt is
+  // serviced and de-asserted.
+  // ---------------------------------------------------------------------------------------
+  bit [31:0] dbg_irq_mip_prev = 32'h0;
+  always @(posedge clknrst_if.clk) begin
+    if ($root.uvmt_cv32e40p_tb.irq_mip !== dbg_irq_mip_prev) begin
+      $display("[SV DEBUG irq_mip] time=%0t irq_mip: 0x%08x -> 0x%08x | irq_i=0x%08x | ovp_cpu_state_stepi=%b | deferint_prime=%b | debug_mode=%b | insn_pc=0x%08x",
+                $time, dbg_irq_mip_prev, $root.uvmt_cv32e40p_tb.irq_mip,
+                $root.uvmt_cv32e40p_tb.dut_wrap.cv32e40p_wrapper_i.irq_i,
+                step_compare_if.ovp_cpu_state_stepi, step_compare_if.deferint_prime,
+                `CV32E40P_CORE.debug_mode, step_compare_if.insn_pc);
+      dbg_irq_mip_prev = $root.uvmt_cv32e40p_tb.irq_mip;
+    end
+  end
+`endif
+
    // PC History Buffer
    bit [31:0] pc_history_spike [45];
    bit [31:0] pc_history_rtl [45];
@@ -569,6 +597,9 @@ import "DPI-C" context function void rvviRefShutdown();
    end
 
    always @(step_compare_if.riscv_retire) begin
+      bit is_dret;
+      bit is_stepie;
+      bit [31:0] irq_fwd_val;
       // check expected against actual
       if (use_iss) begin
 `ifdef ISS_SPIKE
@@ -576,23 +607,78 @@ import "DPI-C" context function void rvviRefShutdown();
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[0][31:0],
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[2][31:0]
          );
-         if (step_compare_if.insn_pc == 32'h5da || step_compare_if.insn_pc == 32'h5d6) begin
-             $display("[SV DEBUG] PC: 0x%08x | irq_mip: 0x%08x | RTL mie: 0x%08x | RTL mstatus.MIE: %b", step_compare_if.insn_pc, $root.uvmt_cv32e40p_tb.irq_mip, `CV32E40P_CORE.cs_registers_i.mie_q, `CV32E40P_CORE.cs_registers_i.mstatus_q.mie);
-         end
-         rvviRefEventStep(step_compare_if.insn_pc);
-         
-         // On Imperas, we have the following logic that controls interrupt delivery:
-         // iss_wrap.io.irq_i = iss_wrap.io.deferint ? dut_wrap.irq :
-         //                     !deferint_ack ? irq_deferint_ack :
-         //                     irq_deferint_sleep;
-         //
-         // We mimic this exact behavior for Spike. step_compare_if.deferint_prime drops
-         // to 0 exactly when the RTL ID stage commits to an interrupt.
-         // By conditionally passing irq_mip only when deferint_prime == 0, we prevent Spike
-         // from evaluating and taking interrupts prematurely (e.g., during the 1-instruction
-         // interrupt shadow following an `mret` instruction where RTL mstatus.MIE hasn't updated,
-         // such as instruction 0x5da).
-         rvviRefSyncIrq((step_compare_if.deferint_prime == 1'b0) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0);
+          rvviRefEventStep(step_compare_if.insn_pc);
+
+          // On Imperas, we have the following logic that controls interrupt delivery:
+          // iss_wrap.io.irq_i = iss_wrap.io.deferint ? dut_wrap.irq :
+          //                     !deferint_ack ? irq_deferint_ack :
+          //                     irq_deferint_sleep;
+          //
+          // We mimic this exact behavior for Spike. step_compare_if.deferint_prime drops
+          // to 0 exactly when the RTL ID stage commits to an interrupt.
+          // By conditionally passing irq_mip only when deferint_prime == 0, we prevent Spike
+          // from evaluating and taking interrupts prematurely (e.g., during the 1-instruction
+          // interrupt shadow following an `mret` instruction where RTL mstatus.MIE hasn't updated,
+          // such as instruction 0x5da).
+          //
+          // ---------------------------------------------------------------------------------------
+          // 1. IS_DRET SIGNAL:
+          // RISC-V 32-bit machine-code opcode for dret (Debug Return) instruction is 32'h7B200073.
+          // We also verify `CV32E40P_CORE.debug_mode` to ensure dret is executing validly inside Debug Mode
+          // (executing 0x7B200073 in Machine/User mode outside debug mode is illegal and does NOT exit debug mode).
+          //
+          // NOTE: this must be sourced from the tracer's retirement-valid instruction word
+          // (tracer_i.insn_val), not the live ID-stage instruction register
+          // (id_stage_i.instr_rdata_i). The ID stage runs several cycles ahead of whichever
+          // instruction is actually retiring in Write-Back when riscv_retire fires, so sampling
+          // instr_rdata_i here can flag is_dret true on a retire pulse that has nothing to do with
+          // dret's own retirement -- causing irq_mip to be forwarded to Spike one retirement early
+          // and Spike to take a pending interrupt before executing the single-stepped instruction
+          // the RTL retires normally (see session_2_walkthrough.md item #16, and debug.rst
+          // "Interrupts during Single-Step Behavior"). step_compare_if.riscv_retire is itself
+          // driven directly off tracer_i.retire (uvmt_cv32e40p_tb.sv), so insn_val is guaranteed
+          // valid for the currently-retiring instruction at this point.
+          // ---------------------------------------------------------------------------------------
+          is_dret = `CV32E40P_CORE.debug_mode &&
+                    ($root.uvmt_cv32e40p_tb.dut_wrap.cv32e40p_wrapper_i.tracer_i.insn_val == 32'h7b200073);
+
+          // ---------------------------------------------------------------------------------------
+          // 2. IS_STEPIE SIGNAL:
+          // `dcsr.stepie` (bit 11 of Debug Control & Status Register 0x7B0, stored in cs_registers_i.dcsr_q.stepie)
+          // controls whether interrupts are enabled during single stepping.
+          // When stepie == 1, interrupts remain active while stepping and trap as normal upon dret.
+          // ---------------------------------------------------------------------------------------
+          is_stepie = `CV32E40P_CORE.cs_registers_i.dcsr_q.stepie;
+
+          // ---------------------------------------------------------------------------------------
+          // 3. SINGLE-STEP INTERRUPT SYNCHRONIZATION:
+          // When returning from Debug Mode via dret while single-step interrupts are enabled (is_dret && is_stepie),
+          // the RTL pipeline evaluates pending interrupts immediately upon exiting Debug Mode.
+          // Because dret retired inside Debug ROM, deferint_prime remains 1. If we only checked
+          // (deferint_prime == 0), Spike's mip would be cleared to 0, causing a PC mismatch.
+          // Therefore, when (is_dret && is_stepie) is true, we forward irq_mip to Spike so Spike
+          // evaluates and takes the pending interrupt on the next step in lockstep with RTL.
+          // ---------------------------------------------------------------------------------------
+          irq_fwd_val = (step_compare_if.deferint_prime == 1'b0 || (is_dret && is_stepie)) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0;
+
+          // ---------------------------------------------------------------------------------------
+          // DEBUG INSTRUMENTATION: dump every control signal feeding the dret/interrupt gating
+          // logic above for every retire inside the debug_test single_step region (single_step.S,
+          // ~0x00012f00-0x000130c0) and inside the Debug ROM (dm_halt_addr .. +0x1000). This is the
+          // exact window covering session_2_walkthrough.md item #16 / Test 18 (Single stepping).
+          // ---------------------------------------------------------------------------------------
+          if ((step_compare_if.insn_pc >= 32'h00012f00 && step_compare_if.insn_pc <= 32'h000130c0) ||
+              (step_compare_if.insn_pc >= $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_halt_addr &&
+               step_compare_if.insn_pc <  $root.uvmt_cv32e40p_tb.core_cntrl_if.dm_halt_addr + 32'h1000)) begin
+             //$display("[SV DEBUG retire] time=%0t pc=0x%08x insn_val=0x%08x id_instr_rdata=0x%08x is_dret=%b is_stepie=%b deferint_prime=%b irq_mip=0x%08x fwd_irq=0x%08x debug_mode=%b dcsr.step=%b dcsr.cause=%0d dcsr.stepie=%b",
+              //         $time, step_compare_if.insn_pc, `CV32E40P_TRACER.insn_val,
+               //        `CV32E40P_CORE.id_stage_i.instr_rdata_i, is_dret, is_stepie,
+                //       step_compare_if.deferint_prime, $root.uvmt_cv32e40p_tb.irq_mip, irq_fwd_val,
+                //       `CV32E40P_CORE.debug_mode, `CV32E40P_CORE.cs_registers_i.dcsr_q.step,
+                 //      `CV32E40P_CORE.cs_registers_i.dcsr_q.cause, `CV32E40P_CORE.cs_registers_i.dcsr_q.stepie);
+          end
+
+          rvviRefSyncIrq(irq_fwd_val);
 `endif
          compare();
       end

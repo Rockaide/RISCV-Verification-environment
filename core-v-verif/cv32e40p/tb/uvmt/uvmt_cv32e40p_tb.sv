@@ -397,7 +397,19 @@ module uvmt_cv32e40p_tb;
           else if (iss_wrap.io.deferint == 1)
             irq_mip[irq_idx] <= 1'b0;
 `else
-          else if (step_compare_if.ovp_cpu_state_stepi)
+          // Spike has no ovp_cpu_state_stepi equivalent (that signal is driven exclusively by
+          // uvmt_cv32e40p_iss_wrap.sv, which only exists `ifdef ISS_IMPERAS), so the clear
+          // condition above never fired under ISS_SPIKE: once irq_i[irq_idx] pulsed once,
+          // irq_mip[irq_idx] latched for the rest of simulation, even long after the RTL
+          // interrupt pin (and any real pending interrupt) was gone. This leaked a stale
+          // sticky bit into unrelated later tests (e.g. Test 18 Single stepping), where
+          // uvmt_cv32e40p_step_compare.sv's is_dret/is_stepie gating would legitimately
+          // forward this stale irq_mip to Spike, causing it to take a phantom interrupt the
+          // RTL never took. step_compare_if.deferint_prime is Spike's direct analog of
+          // iss_wrap.io.deferint (both are driven by the same `id_start && !deferint_prime`
+          // condition above), so mirror the Imperas branch's second (pin-deasserted,
+          // not-mid-commit) clear condition using it.
+          else if (step_compare_if.deferint_prime == 1'b1)
             irq_mip[irq_idx] <= 1'b0;
 `endif
         end
