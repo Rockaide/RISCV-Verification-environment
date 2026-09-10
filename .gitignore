@@ -30,3 +30,11 @@ __pycache__/
 # OS Generated Files
 .DS_Store
 tools/
+
+# Folders not related to development
+common_verification-develop.zip
+cv32e40p-develop.zip
+cv32e40p-initial_commit
+cv32e40p-initial_commit.zip
+ri5cy-golden
+custom_proj
