@@ -329,6 +329,7 @@ uint32_t dm_exception_addr_global = 0;
 // DEBUG INSTRUMENTATION: last mip value seen by rvviRefSyncIrq, so we only print on change
 // instead of flooding the log on every retire. Sentinel forces a print on the first call.
 uint32_t dbg_last_irq_mip = 0xFFFFFFFFu;
+int volatile_load_rd = -1; // VOLATILE LOADS: destination of a load from an RTL-only register, or -1
 
 // DEBUG INSTRUMENTATION: address window covering debug_test's single_step.S
 // (~0x00012f00-0x000130c0) so rvviRefEventStep prints stay scoped to Test 18
@@ -670,6 +671,28 @@ extern "C" {
             //               (int)spike_core->halt_request, (int)pending_step_exception, mip_val, mie_val, dcsr_val, minstret_before);
             // }
 
+            // VOLATILE LOADS: the testbench's random-number and tick registers (mm_ram.sv
+            // MMADDR_RNDNUM/MMADDR_TICKS) exist only on the RTL side. Flag a load from them so the
+            // testbench can give Spike the value the RTL loaded. Decoded at the RTL's retiring PC with
+            // pre-step registers (a trap taken first does not change GPRs).
+            volatile_load_rd = -1;
+            try {
+                uint32_t li = spike_core->get_mmu()->load_insn(rtl_pc).insn.bits();
+                int rd = -1; uint32_t base = 0; int32_t off = 0;
+                if ((li & 0x7f) == 0x03 && ((li >> 12) & 0x7) <= 5) {            // lb/lh/lw/lbu/lhu
+                    rd = (li >> 7) & 0x1f; base = spike_core->get_state()->XPR[(li >> 15) & 0x1f];
+                    off = (int32_t)li >> 20;
+                } else if ((li & 0xe003) == 0x4000) {                             // c.lw
+                    rd = 8 + ((li >> 2) & 0x7); base = spike_core->get_state()->XPR[8 + ((li >> 7) & 0x7)];
+                    off = (((li >> 6) & 1) << 2) | (((li >> 10) & 7) << 3) | (((li >> 5) & 1) << 6);
+                } else if ((li & 0xe003) == 0x4002) {                             // c.lwsp
+                    rd = (li >> 7) & 0x1f; base = spike_core->get_state()->XPR[2];
+                    off = (((li >> 4) & 7) << 2) | (((li >> 12) & 1) << 5) | (((li >> 2) & 3) << 6);
+                }
+                uint32_t addr = base + off;
+                if (rd > 0 && addr >= 0x15001000 && addr < 0x15001008) volatile_load_rd = rd;
+            } catch (...) {}
+
             spike_core->step(1);
 
             // if (dbg_window_pre) {
@@ -845,6 +868,17 @@ extern "C" {
     int rvviRefGetGpr(int reg_index) {
         if (!spike_core) return 0;
         return (int)(spike_core->get_state()->XPR[reg_index] & 0xFFFFFFFF);
+    }
+
+    // Spike's next PC, so the testbench can tell a late retirement of an older instruction from the handler's first one
+    int rvviRefGetPc() { return spike_core ? (int)(spike_core->get_state()->pc & 0xFFFFFFFF) : 0; }
+
+    // VOLATILE LOADS: destination of the last step's load from an RTL-only register, or -1
+    int rvviRefVolatileLoadRd() { return volatile_load_rd; }
+
+    void rvviRefSetGpr(int reg_index, const svBitVecVal* val_ptr) {
+        if (!spike_core || reg_index <= 0 || reg_index > 31) return;
+        spike_core->get_state()->XPR.write(reg_index, (reg_t)(int32_t)*val_ptr);
     }
 
     // Get Spike's value for a given CSR address
