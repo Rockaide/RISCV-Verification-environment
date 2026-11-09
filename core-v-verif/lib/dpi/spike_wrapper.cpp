@@ -89,6 +89,7 @@ extern bool cv32_has_u;
 class cv32e40p_dcsr_t : public dcsr_csr_t {
 public:
     cv32e40p_dcsr_t(processor_t* const proc, const reg_t addr) : dcsr_csr_t(proc, addr) {}
+    reg_t stepie = 0;
     bool unlogged_write(const reg_t val) noexcept override {
         reg_t current = read();
         reg_t new_val = val;
@@ -125,6 +126,7 @@ public:
         // dpi_print("  step      [2]     = %lu\n", (new_val >> 2) & 1);
         // dpi_print("  prv       [1:0]   = %lu\n", new_val & 3);
 
+        stepie = (new_val >> 11) & 1; // Spike's dcsr has no stepie bit; keep it here
         return dcsr_csr_t::unlogged_write(new_val);
     }
     
@@ -151,6 +153,7 @@ public:
         
         // mprven (4), nmip (3), stopcount (10), stoptime (9) are always 0
         val &= ~((1ULL << 4) | (1ULL << 3) | (1ULL << 10) | (1ULL << 9));
+        val |= stepie << 11;
         
         return val;
     }
@@ -326,6 +329,7 @@ uint32_t dm_exception_addr_global = 0;
 // DEBUG INSTRUMENTATION: last mip value seen by rvviRefSyncIrq, so we only print on change
 // instead of flooding the log on every retire. Sentinel forces a print on the first call.
 uint32_t dbg_last_irq_mip = 0xFFFFFFFFu;
+int volatile_load_rd = -1; // VOLATILE LOADS: destination of a load from an RTL-only register, or -1
 
 // DEBUG INSTRUMENTATION: address window covering debug_test's single_step.S
 // (~0x00012f00-0x000130c0) so rvviRefEventStep prints stay scoped to Test 18
@@ -586,7 +590,12 @@ extern "C" {
 
         // Set initial PC from the testbench's boot_addr_i
         spike_core->get_state()->pc = boot_addr;
-        
+
+        // MTVEC RESET: CV32E40P resets mtvec.MODE to vectored (cs_registers MTVEC_MODE = 2'b01) and
+        // loads BASE from mtvec_addr_i at boot (tb MTVEC_ADDR = 0), so mtvec reads 0x1 before software writes it.
+        // Spike resets mtvec to 0.
+        spike_core->get_state()->mtvec->write(0x1);
+
         dpi_print("[DPI-C] Spike initialized successfully with ELF: %s\n", (elf_file ? elf_file : "NONE"));
     }
 
@@ -661,6 +670,28 @@ extern "C" {
             //               rtl_pc, pc_before, spike_core->get_state()->debug_mode, spike_core->get_state()->single_step,
             //               (int)spike_core->halt_request, (int)pending_step_exception, mip_val, mie_val, dcsr_val, minstret_before);
             // }
+
+            // VOLATILE LOADS: the testbench's random-number and tick registers (mm_ram.sv
+            // MMADDR_RNDNUM/MMADDR_TICKS) exist only on the RTL side. Flag a load from them so the
+            // testbench can give Spike the value the RTL loaded. Decoded at the RTL's retiring PC with
+            // pre-step registers (a trap taken first does not change GPRs).
+            volatile_load_rd = -1;
+            try {
+                uint32_t li = spike_core->get_mmu()->load_insn(rtl_pc).insn.bits();
+                int rd = -1; uint32_t base = 0; int32_t off = 0;
+                if ((li & 0x7f) == 0x03 && ((li >> 12) & 0x7) <= 5) {            // lb/lh/lw/lbu/lhu
+                    rd = (li >> 7) & 0x1f; base = spike_core->get_state()->XPR[(li >> 15) & 0x1f];
+                    off = (int32_t)li >> 20;
+                } else if ((li & 0xe003) == 0x4000) {                             // c.lw
+                    rd = 8 + ((li >> 2) & 0x7); base = spike_core->get_state()->XPR[8 + ((li >> 7) & 0x7)];
+                    off = (((li >> 6) & 1) << 2) | (((li >> 10) & 7) << 3) | (((li >> 5) & 1) << 6);
+                } else if ((li & 0xe003) == 0x4002) {                             // c.lwsp
+                    rd = (li >> 7) & 0x1f; base = spike_core->get_state()->XPR[2];
+                    off = (((li >> 4) & 7) << 2) | (((li >> 12) & 1) << 5) | (((li >> 2) & 3) << 6);
+                }
+                uint32_t addr = base + off;
+                if (rd > 0 && addr >= 0x15001000 && addr < 0x15001008) volatile_load_rd = rd;
+            } catch (...) {}
 
             spike_core->step(1);
 
@@ -839,6 +870,17 @@ extern "C" {
         return (int)(spike_core->get_state()->XPR[reg_index] & 0xFFFFFFFF);
     }
 
+    // Spike's next PC, so the testbench can tell a late retirement of an older instruction from the handler's first one
+    int rvviRefGetPc() { return spike_core ? (int)(spike_core->get_state()->pc & 0xFFFFFFFF) : 0; }
+
+    // VOLATILE LOADS: destination of the last step's load from an RTL-only register, or -1
+    int rvviRefVolatileLoadRd() { return volatile_load_rd; }
+
+    void rvviRefSetGpr(int reg_index, const svBitVecVal* val_ptr) {
+        if (!spike_core || reg_index <= 0 || reg_index > 31) return;
+        spike_core->get_state()->XPR.write(reg_index, (reg_t)(int32_t)*val_ptr);
+    }
+
     // Get Spike's value for a given CSR address
     int rvviRefGetCsr(int csr_address) {
         if (!spike_core) return 0;
@@ -865,6 +907,18 @@ extern "C" {
                       dbg_last_irq_mip, mip_val, spike_core->get_state()->pc, spike_core->get_state()->debug_mode,
                       spike_core->get_state()->single_step, (int)spike_core->halt_request);
             dbg_last_irq_mip = mip_val;
+        }
+
+        // INTERRUPT PRIORITY: among the custom lines (16-31) Spike takes the lowest-numbered enabled one
+        // (ctz), CV32E40P the highest (cv32e40p_int_controller: irq 31 first). The standard order (MEI, MSI,
+        // MTI) is the same in both. Keep only the highest enabled custom line visible to Spike's take decision;
+        // the other pending lines are restored by the next rvviRefSyncIrq.
+        uint32_t enabled_custom = mip_val & (uint32_t)spike_core->get_state()->mie->read() & 0xFFFF0000;
+        // Only while Spike could take one (mstatus.MIE): otherwise this is the value software reads.
+        bool can_take = (spike_core->get_state()->mstatus->read() & 0x8) != 0;
+        if (!getenv("NO_PRIO_MODEL") && can_take && (enabled_custom & (enabled_custom - 1))) {
+            uint32_t highest = 0x80000000u >> __builtin_clz(enabled_custom);
+            mip_val = (mip_val & ~enabled_custom) | highest;
         }
 
         if (spike_core->get_state()->csrmap.count(0x344)) {

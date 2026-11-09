@@ -93,11 +93,21 @@ import "DPI-C" context function int rvviRefGetGpr(input int reg_index);
 import "DPI-C" context function int rvviRefGetCsr(input int csr_address);
 import "DPI-C" context function void rvviRefInjectTrap(input int cause, input int epc, input int tval);
 import "DPI-C" context function void rvviRefShutdown();
+import "DPI-C" context function int rvviRefGetPc();
+import "DPI-C" context function int rvviRefVolatileLoadRd();
+import "DPI-C" context function void rvviRefSetGpr(input int reg_index, input bit [31:0] val);
 `endif
 
    bit  Clk;
    bit  miscompare;
    bit  is_stall_sim = 0;
+   // Interrupt-commit tracking (used by compare() and the retirement block)
+   bit        missed_commit;     // a commit window opened since the last retirement
+   bit [31:0] missed_commit_mip; // irq_mip while that window was open
+   bit        last_commit_fwd;   // the last retirement forwarded a commit (irq_mip)
+   int        missed_irq_retires;          // missed-interrupt watchdog: retirements with an interrupt Spike would take
+   localparam int MISSED_IRQ_LIMIT = 8;
+   bit [31:0] irq_pins_q, irq_pins_qq, irq_pins_qqq;
    bit  ignore_dpc_check = 0;
    bit  use_iss = 0;
 
@@ -252,6 +262,7 @@ import "DPI-C" context function void rvviRefShutdown();
       bit ignore;
 
       logic [31:0] csr_val;
+      logic [31:0] mip_cmp;
 
       // Compare PC
 `ifdef ISS_SPIKE
@@ -321,7 +332,10 @@ import "DPI-C" context function void rvviRefShutdown();
          if (rvviRefCsrCompare(12'h340, `CV32E40P_CORE.cs_registers_i.mscratch_q) != 0) begin print_mismatch_history($sformatf("mscratch CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h340), `CV32E40P_CORE.cs_registers_i.mscratch_q)); end
          
          if (rvviRefCsrCompare(12'h304, `CV32E40P_CORE.cs_registers_i.mie_q) != 0) begin print_mismatch_history($sformatf("mie CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h304), `CV32E40P_CORE.cs_registers_i.mie_q)); end
-         if (rvviRefCsrCompare(12'h344, `CV32E40P_CORE.cs_registers_i.mip) != 0) begin print_mismatch_history($sformatf("mip CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h344), `CV32E40P_CORE.cs_registers_i.mip)); end
+         // Spike's mip holds the pins, minus the enabled lines while MIE is set; skip commit retirements.
+         mip_cmp = `CV32E40P_CORE.cs_registers_i.mip;
+         if (rvviRefGetCsr(12'h300) & 32'h8) mip_cmp &= ~rvviRefGetCsr(12'h304);
+         if (!last_commit_fwd && rvviRefCsrCompare(12'h344, mip_cmp) != 0) begin print_mismatch_history($sformatf("mip CSR Mismatch. Spike: 0x%08x RTL: 0x%08x", rvviRefGetCsr(12'h344), mip_cmp)); end
          if (rvviRefCsrCompare(12'hCD2, 32'h0) != 0) begin print_mismatch_history($sformatf("zfinx CSR Mismatch. Spike: 0x%08x", rvviRefGetCsr(12'hCD2))); end
          
          if (`CV32E40P_CORE.cs_registers_i.PULP_XPULP) begin
@@ -596,11 +610,33 @@ import "DPI-C" context function void rvviRefShutdown();
 `endif
    end
 
+`ifdef ISS_SPIKE
+   // COMMIT SAMPLING: deferint_prime is otherwise only sampled at retirements. When the RTL commits to an interrupt
+   // and decodes the handler with no retirement in between (e.g. the bubble after a taken branch, or a long
+   // fetch stall), no retirement sees deferint_prime == 0 and the interrupt never reaches Spike. Sample the
+   // commit window on every core clock instead, together with the pending lines at that time.
+   // The RTL decides on its flopped copy of the pins, so a line dropped in the commit cycle still counts;
+   // keep a testbench-side one-cycle-delayed copy of the pins.
+   always @(posedge clknrst_if.clk) begin
+      irq_pins_q   <= $root.uvmt_cv32e40p_tb.dut_wrap.cv32e40p_wrapper_i.irq_i & 32'hFFFF0888;
+      irq_pins_qq  <= irq_pins_q;
+      irq_pins_qqq <= irq_pins_qq;
+      if (step_compare_if.deferint_prime == 1'b0) begin
+         missed_commit     <= 1'b1;
+         // The RTL may have decided on lines that dropped up to two cycles before this sample
+         // Accumulate over the window (lines may drop while it is open); reset once consumed
+         missed_commit_mip <= (missed_commit ? missed_commit_mip : 32'b0) |
+                              $root.uvmt_cv32e40p_tb.irq_mip | irq_pins_q | irq_pins_qq | irq_pins_qqq;
+      end
+   end
+`endif
+
    always @(step_compare_if.riscv_retire) begin
       bit is_dret;
       bit is_stepie;
       bit is_stepping;
       bit [31:0] irq_fwd_val;
+      bit late_commit;
       // check expected against actual
       if (use_iss) begin
 `ifdef ISS_SPIKE
@@ -608,7 +644,33 @@ import "DPI-C" context function void rvviRefShutdown();
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[0][31:0],
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[2][31:0]
          );
+          // PENDING COMMIT: a commit (deferint_prime == 0, sampled every clock) stays pending until a
+          // retirement can consume it. Forward it just before the step when this retirement is not the
+          // instruction Spike would execute next (the RTL entered the handler), or when it cannot make Spike
+          // trap (MIE clear or lines disabled: a wake from WFI). Otherwise an older instruction is still
+          // retiring (one or more in the window, e.g. a jal after the handler was decoded): step it and wait.
+          late_commit = 1'b0;
+          // STEPIE GATE: Spike single-stepping with dcsr.stepie == 0 cannot take an interrupt; drop the commit
+          if (missed_commit && missed_commit_mip != 32'b0 && ((rvviRefGetCsr(12'h7b0) & 32'h804) == 32'h004)) begin
+             missed_commit = 1'b0;
+          end
+          else if (missed_commit && missed_commit_mip != 32'b0) begin
+             if (rvviRefGetPc() != step_compare_if.insn_pc ||
+                 !((rvviRefGetCsr(12'h300) & 32'h8) && (missed_commit_mip & rvviRefGetCsr(12'h304)))) begin
+                rvviRefSyncIrq(missed_commit_mip);
+                late_commit   = 1'b1; // consumed: this step is the commit's
+                missed_commit = 1'b0;
+             end
+          end
+          else
+             missed_commit = 1'b0;
           rvviRefEventStep(step_compare_if.insn_pc);
+
+          // VOLATILE LOADS: a load from a testbench-only register (random number, ticks) takes the
+          // value the RTL loaded.
+          if (rvviRefVolatileLoadRd() > 0 && `CV32E40P_TRACER.insn_regs_write.size() == 1 &&
+              `CV32E40P_TRACER.insn_regs_write[0].addr == rvviRefVolatileLoadRd())
+             rvviRefSetGpr(rvviRefVolatileLoadRd(), `CV32E40P_TRACER.insn_regs_write[0].value);
 
           // On Imperas, we have the following logic that controls interrupt delivery:
           // iss_wrap.io.irq_i = iss_wrap.io.deferint ? dut_wrap.irq :
@@ -675,8 +737,30 @@ import "DPI-C" context function void rvviRefShutdown();
           // set, we forward irq_mip to Spike so Spike evaluates and takes the pending interrupt on
           // the next step in lockstep with RTL.
           // ---------------------------------------------------------------------------------------
-          irq_fwd_val = (step_compare_if.deferint_prime == 1'b0 ||
-                         (is_dret && (!is_stepping || is_stepie))) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0;
+          last_commit_fwd = ((is_dret && (!is_stepping || is_stepie)) || late_commit);
+          if (is_dret && (!is_stepping || is_stepie))
+             irq_fwd_val = $root.uvmt_cv32e40p_tb.irq_mip | irq_pins_q;
+          else begin
+             // VISIBLE MIP: outside a commit, give Spike the RTL's pending lines so mip reads match, but drop the
+             // enabled ones while Spike's mstatus.MIE is set, so Spike never takes an interrupt the RTL has not
+             // committed to. Spike's own post-step mstatus/mie decide, as they are what its next step uses.
+             // Pending lines come from the core's interrupt pins (implemented lines only), not its internal mip.
+             // One-cycle-delayed pins, as the core's own input flop (int_controller irq_q)
+             irq_fwd_val = irq_pins_q;
+             // MISSED-INTERRUPT WATCHDOG: Spike would take one of these lines now (enabled, MIE set, not in debug
+             // mode or in a single-step with interrupts masked), but the RTL has not committed to it.
+             if ((irq_fwd_val & rvviRefGetCsr(12'h304)) != 0 && (rvviRefGetCsr(12'h300) & 32'h8) &&
+                 !`CV32E40P_CORE.debug_mode && !(is_stepping && !is_stepie))
+                missed_irq_retires++;
+             else
+                missed_irq_retires = 0;
+             if (missed_irq_retires == MISSED_IRQ_LIMIT)
+                `uvm_error("Step-and-Compare", $sformatf("Missed interrupt: enabled pending lines 0x%08x not taken after %0d retirements",
+                           irq_fwd_val & rvviRefGetCsr(12'h304), MISSED_IRQ_LIMIT))
+             if (rvviRefGetCsr(12'h300) & 32'h8)
+                irq_fwd_val &= ~rvviRefGetCsr(12'h304);
+          end
+          if (last_commit_fwd || missed_commit) missed_irq_retires = 0;
 
           // ---------------------------------------------------------------------------------------
           // DEBUG INSTRUMENTATION: dump every control signal feeding the dret/interrupt gating
