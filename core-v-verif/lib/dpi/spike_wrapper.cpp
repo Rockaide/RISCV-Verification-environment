@@ -89,6 +89,7 @@ extern bool cv32_has_u;
 class cv32e40p_dcsr_t : public dcsr_csr_t {
 public:
     cv32e40p_dcsr_t(processor_t* const proc, const reg_t addr) : dcsr_csr_t(proc, addr) {}
+    reg_t stepie = 0;
     bool unlogged_write(const reg_t val) noexcept override {
         reg_t current = read();
         reg_t new_val = val;
@@ -125,6 +126,7 @@ public:
         // dpi_print("  step      [2]     = %lu\n", (new_val >> 2) & 1);
         // dpi_print("  prv       [1:0]   = %lu\n", new_val & 3);
 
+        stepie = (new_val >> 11) & 1; // Spike's dcsr has no stepie bit; keep it here
         return dcsr_csr_t::unlogged_write(new_val);
     }
     
@@ -151,6 +153,7 @@ public:
         
         // mprven (4), nmip (3), stopcount (10), stoptime (9) are always 0
         val &= ~((1ULL << 4) | (1ULL << 3) | (1ULL << 10) | (1ULL << 9));
+        val |= stepie << 11;
         
         return val;
     }
