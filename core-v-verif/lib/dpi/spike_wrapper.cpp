@@ -875,6 +875,18 @@ extern "C" {
             dbg_last_irq_mip = mip_val;
         }
 
+        // INTERRUPT PRIORITY: among the custom lines (16-31) Spike takes the lowest-numbered enabled one
+        // (ctz), CV32E40P the highest (cv32e40p_int_controller: irq 31 first). The standard order (MEI, MSI,
+        // MTI) is the same in both. Keep only the highest enabled custom line visible to Spike's take decision;
+        // the other pending lines are restored by the next rvviRefSyncIrq.
+        uint32_t enabled_custom = mip_val & (uint32_t)spike_core->get_state()->mie->read() & 0xFFFF0000;
+        // Only while Spike could take one (mstatus.MIE): otherwise this is the value software reads.
+        bool can_take = (spike_core->get_state()->mstatus->read() & 0x8) != 0;
+        if (!getenv("NO_PRIO_MODEL") && can_take && (enabled_custom & (enabled_custom - 1))) {
+            uint32_t highest = 0x80000000u >> __builtin_clz(enabled_custom);
+            mip_val = (mip_val & ~enabled_custom) | highest;
+        }
+
         if (spike_core->get_state()->csrmap.count(0x344)) {
             // Write to mip directly using backdoor_write_with_mask, which bypasses
             // the write_mask (since CV32E40P's mip is read-only from software).
