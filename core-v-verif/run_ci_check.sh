@@ -81,9 +81,9 @@ incr_test_counts
 
 # --> Test: corev_rand_instr_test : Build: uvmt_cv32e40p : Generated corev-dv random instruction test
 # --> Test (Index: 0): make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test : Generated corev-dv random instruction test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
@@ -94,9 +94,9 @@ failed=0
 check_log ${log} "SIMULATION PASSED" corev_rand_instr_test
 incr_test_counts
 # --> Test (Index: 1): make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test : Generated corev-dv random instruction test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_instr_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
@@ -109,9 +109,9 @@ incr_test_counts
 
 # --> Test: corev_rand_interrupt : Build: uvmt_cv32e40p : Interrupt random test
 # --> Test (Index: 0): make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt : Interrupt random test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
@@ -122,9 +122,9 @@ failed=0
 check_log ${log} "SIMULATION PASSED" corev_rand_interrupt
 incr_test_counts
 # --> Test (Index: 1): make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt : Interrupt random test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_interrupt CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
@@ -137,9 +137,9 @@ incr_test_counts
 
 # --> Test: corev_rand_jump_stress_test : Build: uvmt_cv32e40p : Generated corev-dv jump stress test
 # --> Test (Index: 0): make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test : Generated corev-dv jump stress test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=0 RUN_INDEX=0  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
@@ -150,9 +150,9 @@ failed=0
 check_log ${log} "SIMULATION PASSED" corev_rand_jump_stress_test
 incr_test_counts
 # --> Test (Index: 1): make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test : Generated corev-dv jump stress test
-echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike]"
+echo "run_ci_check: Running test [cd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt && make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei]"
 pushd /home/rocca/riscv-workspace/core-v-verif/cv32e40p/sim/uvmt > /dev/null
-make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike >& /dev/null;
+make gen_corev-dv test COREV=YES TEST=corev_rand_jump_stress_test CV_CORE=cv32e40p CFG=default COREV=1 SIMULATOR=xrun COMP=0 USE_ISS=YES COV= SEED=random GEN_START_INDEX=1 RUN_INDEX=1  USE_ISS=YES ISS=spike CV_SW_MARCH=rv32imc_zicsr_zifencei >& /dev/null;
 popd > /dev/null
 
 
