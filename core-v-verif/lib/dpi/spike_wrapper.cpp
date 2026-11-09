@@ -589,7 +589,12 @@ extern "C" {
 
         // Set initial PC from the testbench's boot_addr_i
         spike_core->get_state()->pc = boot_addr;
-        
+
+        // MTVEC RESET: CV32E40P resets mtvec.MODE to vectored (cs_registers MTVEC_MODE = 2'b01) and
+        // loads BASE from mtvec_addr_i at boot (tb MTVEC_ADDR = 0), so mtvec reads 0x1 before software writes it.
+        // Spike resets mtvec to 0.
+        spike_core->get_state()->mtvec->write(0x1);
+
         dpi_print("[DPI-C] Spike initialized successfully with ELF: %s\n", (elf_file ? elf_file : "NONE"));
     }
 
