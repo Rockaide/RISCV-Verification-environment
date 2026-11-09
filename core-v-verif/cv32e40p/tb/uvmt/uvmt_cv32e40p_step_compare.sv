@@ -596,11 +596,28 @@ import "DPI-C" context function void rvviRefShutdown();
 `endif
    end
 
+`ifdef ISS_SPIKE
+   // COMMIT SAMPLING: deferint_prime is otherwise only sampled at retirements. When the RTL commits to an interrupt
+   // and decodes the handler with no retirement in between (e.g. the bubble after a taken branch, or a long
+   // fetch stall), no retirement sees deferint_prime == 0 and the interrupt never reaches Spike. Sample the
+   // commit window on every core clock instead, together with the pending lines at that time.
+   bit        missed_commit;     // a commit window opened since the last retirement
+   bit [31:0] missed_commit_mip; // irq_mip while that window was open
+   bit [31:0] last_irq_fwd;      // last value given to rvviRefSyncIrq
+   always @(posedge clknrst_if.clk) begin
+      if (step_compare_if.deferint_prime == 1'b0) begin
+         missed_commit     <= 1'b1;
+         missed_commit_mip <= $root.uvmt_cv32e40p_tb.irq_mip;
+      end
+   end
+`endif
+
    always @(step_compare_if.riscv_retire) begin
       bit is_dret;
       bit is_stepie;
       bit is_stepping;
       bit [31:0] irq_fwd_val;
+      bit step_noie;
       // check expected against actual
       if (use_iss) begin
 `ifdef ISS_SPIKE
@@ -608,6 +625,15 @@ import "DPI-C" context function void rvviRefShutdown();
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[0][31:0],
              `CV32E40P_CORE.cs_registers_i.mhpmcounter_q[2][31:0]
          );
+          // LATE COMMIT: the commit window closed before this retirement and nothing was forwarded for it, so this
+          // retirement is the handler's first instruction: let Spike take the interrupt in this step.
+          // STEPIE GATE: Spike single-stepping with dcsr.stepie == 0 cannot take an interrupt
+          step_noie = ((rvviRefGetCsr(12'h7b0) & 32'h804) == 32'h004);
+          if (missed_commit && step_compare_if.deferint_prime == 1'b1 && last_irq_fwd == 32'b0 &&
+              missed_commit_mip != 32'b0 && !step_noie) begin
+             rvviRefSyncIrq(missed_commit_mip);
+          end
+          missed_commit = 1'b0;
           rvviRefEventStep(step_compare_if.insn_pc);
 
           // On Imperas, we have the following logic that controls interrupt delivery:
@@ -675,7 +701,8 @@ import "DPI-C" context function void rvviRefShutdown();
           // set, we forward irq_mip to Spike so Spike evaluates and takes the pending interrupt on
           // the next step in lockstep with RTL.
           // ---------------------------------------------------------------------------------------
-          irq_fwd_val = (step_compare_if.deferint_prime == 1'b0 ||
+          step_noie = ((rvviRefGetCsr(12'h7b0) & 32'h804) == 32'h004);
+          irq_fwd_val = ((step_compare_if.deferint_prime == 1'b0 && !step_noie) ||
                          (is_dret && (!is_stepping || is_stepie))) ? $root.uvmt_cv32e40p_tb.irq_mip : 32'b0;
 
           // ---------------------------------------------------------------------------------------
@@ -696,6 +723,7 @@ import "DPI-C" context function void rvviRefShutdown();
           end
 
           rvviRefSyncIrq(irq_fwd_val);
+          last_irq_fwd = irq_fwd_val;
 `endif
          compare();
       end
